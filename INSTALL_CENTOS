@@ -1,0 +1,59 @@
+#To install erlyvideo from source on CentOS you need the following prerequisites:
+
+#1) installed erlang
+
+yum install gcc glibc-devel make ncurses-devel openssl-devel
+
+wget http://erlang.org/download/otp_src_R14B.tar.gz
+tar zxvf otp_src_R14B.tar.gz
+cd otp_src_R14B
+./configure && make && sudo make install
+
+#2) install git
+
+yum install gettext-devel expat-devel curl-devel zlib-devel openssl-devel
+
+wget http://kernel.org/pub/software/scm/git/git-1.6.1.tar.gz
+tar xvfz git-1.6.1.tar.gz
+cd git-1.6.1.tar.gz
+make prefix=/usr/local all
+make prefix=/usr/local install
+
+
+#3) create user/group
+
+groupadd erlyvideo
+useradd -g erlyvideo erlyvideo
+
+#4) get erlyvideo
+#go to your desired path (except /home)
+
+cd /home/erlyvideo
+
+#git clone git://github.com/nikoladd/erlyvideo.git
+git clone git://github.com/erlyvideo/erlyvideo.git
+cd erlyvideo
+
+#5) create erlyvideo configuration
+#default paths should work with the rebuild script below
+
+cp priv/erlyvideo.conf.sample priv/erlyvideo.conf
+nano priv/erlyvideo.conf
+
+#6) run the update script to compile AND install the binaries in the respective folders
+
+chmod +x rebuild_erlyvideo.sh
+./rebuild_erlyvideo.sh initial
+
+#7) start erlyvideo 
+/etc/init.d/erlyvideo start
+
+#8) edit firewall rules to allow conneciton ports needed!
+
+nano /etc/sysconfig/iptables
+#add (without the # in front)
+#-A RH-Firewall-1-INPUT -p tcp --dport 1935 -j ACCEPT
+/etc/init.d/iptables restart
+
+#9) make erlyvideo start automatically at boot
+chkconfig --level 345 erlyvideo on
