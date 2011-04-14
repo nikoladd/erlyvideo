@@ -2,27 +2,37 @@ include debian/version.mk
 ERLANG_ROOT := $(shell erl -eval 'io:format("~s", [code:root_dir()])' -s init stop -noshell)
 ERLDIR=$(ERLANG_ROOT)/lib/erlyvideo-$(VERSION)
 DESTROOT:=$(CURDIR)/debian/erlyvideo
-ERL_LIBS:=deps:lib:plugins:..
+ERL_LIBS:=deps:plugins
 
 
 
-NIFDIR := `erl -eval 'io:format("~s", [code:lib_dir(erts,include)])' -s init stop -noshell| sed s'/erlang\/lib\//erlang\//'`
-NIF_FLAGS := `ruby -rrbconfig -e 'puts Config::CONFIG["LDSHARED"]'` -O3 -fPIC -fno-common -Wall
-
+# NIFDIR := `erl -eval 'io:format("~s", [code:lib_dir(erts,include)])' -s init stop -noshell| sed s'/erlang\/lib\//erlang\//'`
+# 
+# ifeq ($(shell uname), Linux)
+# NIF_FLAGS := gcc -shared -O3 -fPIC -fno-common -Wall
+# endif
+# 
+# ifeq ($(shell uname), Darwin)
+# NIF_FLAGS := cc -arch i386 -arch x86_64 -pipe -bundle -undefined dynamic_lookup -O3 -fPIC -fno-common -Wall
+# endif
+# 
+# ifeq ($(shell uname), FreeBSD)
+# NIF_FLAGS := cc -shared -O3 -fPIC -fno-common -Wall
+# endif
 
 ERL=erl +A 4 +K true
 APP_NAME=ems
 
-all: compile 
+all: compile
 
 update:
 	git pull
 
-
-compile: ebin/mmap.so
+compile:
 	ERL_LIBS=$(ERL_LIBS) erl -make
 	(cd deps/ibrowse && make)
-	(cd deps/erlydtl && make)
+
+
 
 ebin/mmap.so: src/core/mmap.c
 	$(NIF_FLAGS) -o $@ $< -I $(NIFDIR) || touch $@
@@ -62,7 +72,7 @@ install: compile
 	mkdir -p $(DESTROOT)/var/lib/erlyvideo/movies
 	mkdir -p $(DESTROOT)/var/lib/erlyvideo/plugins
 	mkdir -p $(DESTROOT)$(ERLDIR)
-	cp -r ebin src include lib Emakefile $(DESTROOT)$(ERLDIR)/
+	cp -r ebin src include Emakefile $(DESTROOT)$(ERLDIR)/
 	mkdir -p $(DESTROOT)/usr/bin/
 	cp contrib/reverse_mpegts $(DESTROOT)/usr/bin/reverse_mpegts
 	cp contrib/erlyctl.debian $(DESTROOT)/usr/bin/erlyctl
@@ -77,8 +87,8 @@ install: compile
 	mkdir -p $(DESTROOT)/var/cache/erlyvideo/licensed
 	chown erlyvideo.erlyvideo $(DESTROOT)/var/lib/erlyvideo/movies
 	chown erlyvideo.erlyvideo $(DESTROOT)/var/cache/erlyvideo/licensed
-	for i in deps/amf deps/log4erl deps/erlydtl deps/erlmedia deps/mpegts deps/rtmp deps/rtp deps/rtsp deps/ibrowse ; do (cd $$i; make DESTROOT=$(DESTROOT) ERLANG_ROOT=$(ERLANG_ROOT) VERSION=$(VERSION) install) ; done
+	for i in deps/amf deps/log4erl deps/erlmedia deps/mpegts deps/rtmp deps/rtp deps/rtsp deps/ibrowse ; do (cd $$i; make DESTROOT=$(DESTROOT) ERLANG_ROOT=$(ERLANG_ROOT) VERSION=$(VERSION) install) ; done
 
 
-.PHONY: doc debian compile 
+.PHONY: doc debian compile
 

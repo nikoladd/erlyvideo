@@ -25,7 +25,6 @@
 -author('Max Lapshin <max@maxidoors.ru>').
 -include("../log.hrl").
 -include_lib("kernel/include/file.hrl").
-
 -export([http/4]).
 
 
@@ -43,7 +42,7 @@ http(Host, 'GET', ["erlyvideo", "api", "filelist"], Req) ->
   FileList = lists:foldr(fun(Path, List) ->
     case lists:member(filename:extension(Path), Allowed) of
       true ->
-        BinPath = list_to_binary(Path),
+        BinPath = unicode:characters_to_binary(Path),
         [[{id,BinPath},{text,BinPath},{leaf,true}]|List];
       _ ->
         List
@@ -57,10 +56,29 @@ http(Host, 'GET', ["erlyvideo", "api", "streams"], Req) ->
   Streams = [ clean_values([{name,Name}|Info]) || {Name, _Pid, Info} <- media_provider:entries(Host)],
   Req:ok([{'Content-Type', "application/json"}], [mochijson2:encode([{streams,Streams}]), "\n"]);
 
+http(_Host, 'GET', ["erlyvideo","api","licenses"], Req) -> 
+  case ems_license_client:list() of
+    {ok, List} -> 
+      Info = [Project || {project, Project} <- List],
+      Req:ok([{'Content-Type', "application/json"}], [mochijson2:encode([{licenses, Info}]), "\n"]);
+    {error, notfound} ->
+      Req:respond(404, [{'Content-Type', "application/json"}], [mochijson2:encode([{error, notfound}]), "\n"]);
+    _Else ->
+      Req:respond(500, [{'Content-Type', "application/json"}], [mochijson2:encode([{error, unknown}]), "\n"])
+  end;
+
+http(_Host, 'POST', ["erlyvideo","api","licenses"], Req) ->
+  Reply = case ems_license_client:load() of
+   ok -> ok;
+   {error, Reason} -> Reason
+  end,
+  Req:ok([{'Content-Type', "application/json"}], [mochijson2:encode([{state,Reply}]),"\n"]);
+
+
 http(_, _, _, _) ->
   unhandled.
   
-  
+
 clean_values(Info) ->
   clean_values(lists:ukeysort(1, lists:reverse(Info)), []).
   
@@ -73,5 +91,10 @@ clean_values([{Key,Value}|Info], Acc) when is_binary(Value) ->
     false -> clean_values(Info, Acc)
   end;
 
+clean_values([{_Key, Value}|Info], Acc) when is_tuple(Value) ->
+  clean_values(Info, Acc);
+  
 clean_values([{K,V}|Info], Acc) ->
   clean_values(Info, [{K,V}|Acc]).
+
+

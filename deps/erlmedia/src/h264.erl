@@ -5,7 +5,7 @@
 %%% @end
 %%%
 %%% This file is part of erlmedia.
-%%% 
+%%%
 %%% erlmedia is free software: you can redistribute it and/or modify
 %%% it under the terms of the GNU General Public License as published by
 %%% the Free Software Foundation, either version 3 of the License, or
@@ -30,16 +30,17 @@
 -include("../include/h264.hrl").
 -include("../include/video_frame.hrl").
 
--export([decode_nal/2, video_config/1, has_config/1, unpack_config/1, metadata_frame/1, metadata/1]).
+-export([decode_nal/2, video_config/1, decoder_config/1, has_config/1, unpack_config/1, metadata_frame/1, metadata/1]).
 -export([profile_name/1, exp_golomb_read_list/2, exp_golomb_read_list/3, exp_golomb_read_s/1]).
--export([parse_sps/1, init/0]).
+-export([parse_sps/1, to_fmtp/1, init/0, init/1]).
+-export([type/1, fua_split/2]).
 
 
 video_config(H264) ->
   case has_config(H264) of
     false -> undefined;
     true ->
-      #video_frame{       
+      #video_frame{
        	content = video,
        	flavor  = config,
     		dts     = 0,
@@ -50,36 +51,41 @@ video_config(H264) ->
   end.
 
 metadata(Config) ->
-  {_, [SPSBin, _]} = unpack_config(Config),
+  {LengthSize, [SPSBin, _]} = unpack_config(Config),
   #h264_sps{width = Width, height = Height} = parse_sps(SPSBin),
-  [{width,Width},{height,Height}].
-  
+  [{width,Width},{height,Height},{length_size,LengthSize}].
+
 
 metadata_frame(Config) ->
-  #video_frame{       
+  #video_frame{
    	content = metadata,
 		dts     = 0,
 		pts     = 0,
 		body    = [<<"onMetaData">>, {object, metadata(Config)}]
 	}.
-  
-      
+
+
 %% Look at vlc/modules/demux/mp4/libmp4.c:1022
 %%
 unpack_config(<<_Version, _Profile, _ProfileCompat, _Level, _Skip1:6, LengthSize:2, _Skip2:3, SPSCount:5, Rest/binary>>) ->
   {SPS, <<PPSCount, Rest1/binary>>} = parse_h264_config(Rest, SPSCount, []),
   {PPS, <<>>} = parse_h264_config(Rest1, PPSCount, SPS),
   {LengthSize + 1, lists:reverse(PPS)}.
-  
-  
+
 init() -> #h264{}.
-  
-  
+
+init(Config) when is_binary(Config) -> 
+  {LengthSize, NALS} = unpack_config(Config),
+  SPS = [NAL || NAL <- NALS, type(NAL) == sps],
+  PPS = [NAL || NAL <- NALS, type(NAL) == pps],
+  #h264_sps{profile = Profile, level = Level} = parse_sps(hd(SPS)),
+  #h264{length_size = LengthSize*8, sps = SPS, pps = PPS, profile = Profile, level = Level}.
+
 parse_h264_config(Rest, 0, List) -> {List, Rest};
-parse_h264_config(<<Length:16, NAL:Length/binary, Rest/binary>>, Count, List) -> 
+parse_h264_config(<<Length:16, NAL:Length/binary, Rest/binary>>, Count, List) ->
   parse_h264_config(Rest, Count - 1, [NAL|List]).
 
-  
+
 has_config(#h264{sps = SPS, pps = PPS}) when length(SPS) > 0 andalso length(PPS) > 0 -> true;
 has_config(_) -> false.
 
@@ -90,10 +96,13 @@ decoder_config(#h264{pps = PPS, sps = SPS, profile = Profile, profile_compat = P
   Version = 1,
   SPSBin = iolist_to_binary(SPS),
   PPSBin = iolist_to_binary(PPS),
-  <<Version, Profile, ProfileCompat, Level, 2#111111:6, LengthSize:2, 
+  <<Version, Profile, ProfileCompat, Level, 2#111111:6, LengthSize:2,
     2#111:3, (length(SPS)):5, (size(SPSBin)):16, SPSBin/binary,
     (length(PPS)), (size(PPSBin)):16, PPSBin/binary>>.
 
+
+type(<<0:1, _:2, Type:5, _/binary>>) ->
+  nal_unit_type(Type).
 
 decode_nal(<<0:1, _NalRefIdc:2, ?NAL_SINGLE:5, _/binary>> = Data, #h264{} = H264) ->
   Header = slice_header(Data),
@@ -146,19 +155,18 @@ decode_nal(<<0:1, _NalRefIdc:2, ?NAL_IDR:5, _/binary>> = Data, #h264{} = H264) -
 		codec   = h264,
 		sound   = slice_header(Data)
   },
-  ?D({"I-frame", VideoFrame}),
+  % ?D({"I-frame", VideoFrame}),
   {H264, [VideoFrame]};
 
 decode_nal(<<0:1, _NalRefIdc:2, ?NAL_SEI:5, _/binary>> = Data, #h264{} = H264) ->
   ?D({"SEI", Data}),
-  _VideoFrame = #video_frame{
+  VideoFrame = #video_frame{
    	content = video,
 		body    = nal_with_size(Data),
 		flavor  = frame,
 		codec   = h264
   },
-  
-  {H264, []};
+  {H264, [VideoFrame]};
 
 decode_nal(<<0:1, _NalRefIdc:2, ?NAL_SPS:5, Profile, _:8, Level, _/binary>> = SPS, #h264{} = H264) ->
   % io:format("log2_max_frame_num_minus4: ~p~n", [Log2MaxFrameNumMinus4]),
@@ -196,7 +204,7 @@ decode_nal(<<0:1, _NalRefIdc:2, ?NAL_DELIM:5, _PrimaryPicTypeId:3, _:5, _/binary
   {H264, [VideoFrame]};
 
 
-  
+
 decode_nal(<<0:1, _NRI:2, ?NAL_STAP_A:5, Rest/binary>>, H264) ->
   ?D("STAPA"),
   decode_stapa(Rest, [], H264);
@@ -219,17 +227,21 @@ decode_nal(<<0:1, NRI:2, ?NAL_FUA:5, 1:1, _End:1, 0:1, Type:5, Rest/binary>>, H2
   ?D("FUA start"),
   {H264#h264{buffer = <<0:1, NRI:2, Type:5, Rest/binary>>}, []};
 
+decode_nal(<<0:1, _NRI:2, ?NAL_FUA:5, _/binary>>, #h264{buffer = undefined} = H264) ->
+  ?D({skip_broken_fua}),
+  {H264, []};
+
 decode_nal(<<0:1, _NRI:2, ?NAL_FUA:5, 0:1, 0:1, 0:1, _Type:5, Rest/binary>>, #h264{buffer = Buf} = H264) ->
   ?D("FUA cont"),
   {H264#h264{buffer = <<Buf/binary, Rest/binary>>}, []};
 
 decode_nal(<<0:1, NRI:2, ?NAL_FUA:5, 1:1, 1:1, 0:1, Type:5, Rest/binary>>, H264) ->
   ?D("FUA one"),
-  decode_nal(<<0:1, NRI:2, Type:5, Rest/binary>>, H264#h264{buffer = <<>>});
+  decode_nal(<<0:1, NRI:2, Type:5, Rest/binary>>, H264#h264{buffer = undefined});
 
 decode_nal(<<0:1, _NRI:2, ?NAL_FUA:5, 0:1, 1:1, 0:1, _Type:5, Rest/binary>>, #h264{buffer = Buf} = H264) ->
   ?D("FUA end"),
-  decode_nal(<<Buf/binary, Rest/binary>>, H264#h264{buffer = <<>>});
+  decode_nal(<<Buf/binary, Rest/binary>>, H264#h264{buffer = undefined});
 
 
 % decode_nal(<<0:1, _NRI:2, ?NAL_FUA:5, S:1, E:1, R:1, _Type:5, Rest/binary>>, #h264{buffer = Buf} = H264) ->
@@ -244,65 +256,104 @@ decode_nal(<<0:1, _NalRefIdc:2, ?NAL_FILLER:5, _/binary>>, H264) ->
 decode_nal(<<0:1, _NalRefIdc:2, _NalUnitType:5, _/binary>> = _NAL, H264) ->
   ?D({"Unknown NAL unit type", _NalUnitType, size(_NAL)}),
   {H264, []}.
-  
+
 decode_stapa(<<Size:16, NAL:Size/binary, Rest/binary>>, Frames, H264) ->
   {H264_1, NewFrames} = decode_nal(NAL, H264),
   decode_stapa(Rest, Frames ++ NewFrames, H264_1);
-  
+
 decode_stapa(<<>>, Frames, H264) ->
   {H264, Frames}.
-  
+
 nal_with_size(NAL) -> <<(size(NAL)):32, NAL/binary>>.
 
 
-parse_sps(<<0:1, _NalRefIdc:2, ?NAL_SPS:5, Profile, _:8, Level, Data/binary>>) when Profile >= 100 ->
+profile_has_scaling_matrix(Profile) ->
+  lists:member(Profile, [100, 110, 122, 244, 44, 83, 86, 118, 128]).
+
+parse_sps(<<0:1, _NalRefIdc:2, ?NAL_SPS:5, Profile, _:8, Level, Data/binary>>) ->
   {SPS_ID, Rest} = exp_golomb_read(Data),
+  SPS = #h264_sps{profile = Profile, level = Level, sps_id = SPS_ID},
+  Rest1 = case profile_has_scaling_matrix(Profile) of
+    true -> parse_extended_sps1(Rest);
+    false -> Rest
+  end,
+  parse_sps_data(Rest1, SPS).
+  
+parse_extended_sps1(Rest) ->
   {ChromaFormat, Rest1} = exp_golomb_read(Rest),
   case ChromaFormat of
-    3 -> <<_:1, Rest2/bitstring>> = Rest1;
-    _ -> Rest2 = Rest1
+    3 -> <<_SeparateColourPlane:1, Rest2/bitstring>> = Rest1;
+    1 -> Rest2 = Rest1
   end,
   {_BitDepthLuma, Rest3} = exp_golomb_read(Rest2),
   {_BitDepthChroma, Rest4} = exp_golomb_read(Rest3),
-  <<_:2, Rest5/bitstring>> = Rest4,
-  SPS = #h264_sps{profile = Profile, level = Level, sps_id = SPS_ID},
-  parse_sps_data(Rest5, SPS);
+  <<_TransformBypass:1, ScalingMatrixPresent:1, Rest5/bitstring>> = Rest4,
+  case ScalingMatrixPresent of
+    0 -> Rest5;
+    1-> 
+      ScalingListCount = case ChromaFormat of
+        3 -> 12;
+        1 -> 8
+      end,
+      parse_scaling_list(Rest5, 0, ScalingListCount)
+  end.
 
-parse_sps(<<0:1, _NalRefIdc:2, ?NAL_SPS:5, Profile, _:8, Level, Data/binary>>) ->
-  {SPS_ID, Rest1} = exp_golomb_read(Data),
-  % ?D({"SPS ID", SPS_ID}),
-  SPS = #h264_sps{profile = Profile, level = Level, sps_id = SPS_ID},
-  parse_sps_data(Rest1, SPS).
+
+parse_scaling_list(Data, Count, Count) ->
+  Data;
   
+parse_scaling_list(<<0:1, Data/bitstring>>, I, Count) when I < Count ->
+  parse_scaling_list(Data, I + 1, Count);
   
+parse_scaling_list(<<1:1, Data/bitstring>>, I, Count) when I < 6 ->
+  Rest = decode_scaling_list(Data, 16),
+  parse_scaling_list(Rest, I + 1, Count);
+
+parse_scaling_list(<<1:1, Data/bitstring>>, I, Count) when I < Count ->
+  Rest = decode_scaling_list(Data, 64),
+  parse_scaling_list(Rest, I+1, Count).
+
+decode_scaling_list(Data, Count) ->
+  decode_scaling_list(Data, Count, 8).
+
+decode_scaling_list(Data, 0, _NextScale) -> Data;
+decode_scaling_list(Data, Count, NextScale = 0) -> decode_scaling_list(Data, Count - 1, NextScale);
+decode_scaling_list(Data, Count, NextScale) ->
+  {Delta, Rest} = exp_golomb_read_s(Data),
+  decode_scaling_list(Rest, Count - 1, (NextScale + Delta + 256) rem 256).
+  
+
 parse_sps_data(Data, SPS) ->
   {Log2FrameNum, Rest2} = exp_golomb_read(Data),
   {PicOrder, Rest3} = exp_golomb_read(Rest2),
-  ?D({"Pic order", PicOrder}),
+  % ?D({"Pic order", PicOrder}),
   parse_sps_pic_order(Rest3, PicOrder, SPS#h264_sps{max_frame_num = Log2FrameNum+4}).
-  
+
 parse_sps_pic_order(Data, 0, SPS) ->
   {_Log2PicOrder, Rest} = exp_golomb_read(Data),
   parse_sps_ref_frames(Rest, SPS);
-  
+
 parse_sps_pic_order(<<_AlwaysZero:1, Data/bitstring>>, 1, SPS) ->
   {_OffsetNonRef, Rest1} = exp_golomb_read_s(Data),
   {_OffsetTopBottom, Rest2} = exp_golomb_read_s(Rest1),
-  {NumRefFrames, Rest3} = exp_golomb_read_s(Rest2),
+  {NumRefFrames, Rest3} = exp_golomb_read(Rest2),
   NumRefFrames = 0,
   parse_sps_ref_frames(Rest3, SPS);
 
 parse_sps_pic_order(Data, 2, SPS) ->
   parse_sps_ref_frames(Data, SPS).
-  
+
 parse_sps_ref_frames(Data, SPS) ->
   {_NumRefFrames, <<_Gaps:1, Rest1/bitstring>>} = exp_golomb_read(Data),
   {PicWidth, Rest2} = exp_golomb_read(Rest1),
   Width = (PicWidth + 1)*16,
-  {PicHeight, <<_FrameMbsOnly:1, _Rest3/bitstring>>} = exp_golomb_read(Rest2),
-  Height = (PicHeight + 1)*16,
+  {PicHeight, <<FrameMbsOnly:1, _Rest3/bitstring>>} = exp_golomb_read(Rest2),
+  Height = case FrameMbsOnly of
+    1 -> (PicHeight + 1)*16;
+    0 -> (PicHeight + 1)*16*2
+  end,
   SPS#h264_sps{width = Width, height = Height}.
-  
+
 
 profile_name(66) -> "Baseline";
 profile_name(77) -> "Main";
@@ -364,22 +415,22 @@ nal_unit_type(?NAL_FUB) -> fub.
 
 exp_golomb_read_list(Bin, List) ->
   exp_golomb_read_list(Bin, List, []).
-  
+
 exp_golomb_read_list(Bin, [], Results) -> {Results, Bin};
 exp_golomb_read_list(Bin, [Key | Keys], Results) ->
   {Value, Rest} = exp_golomb_read(Bin),
   exp_golomb_read_list(Rest, Keys, [{Key, Value} | Results]).
 
 exp_golomb_read_s(Bin) ->
-  {Value, _Rest} = exp_golomb_read(Bin),
+  {Value, Rest} = exp_golomb_read(Bin),
   case Value band 1 of
-    1 -> (Value + 1)/2;
-    _ -> - (Value/2)
+    1 -> {(Value + 1) div 2, Rest};
+    _ -> {- (Value div 2), Rest}
   end.
 
 exp_golomb_read(Bin) ->
   exp_golomb_read(Bin, 0).
-  
+
 exp_golomb_read(<<0:1, Rest/bitstring>>, LeadingZeros) ->
   exp_golomb_read(Rest, LeadingZeros + 1);
 
@@ -387,6 +438,47 @@ exp_golomb_read(<<1:1, Data/bitstring>>, LeadingZeros) ->
   <<ReadBits:LeadingZeros, Rest/bitstring>> = Data,
   CodeNum = (1 bsl LeadingZeros) -1 + ReadBits,
   {CodeNum, Rest}.
+
+
+
+fua_split(NAL, Size) when size(NAL) =< Size -> NAL;
+
+fua_split(<<0:1, NRI:2, Type:5, _/binary>> = NAL, Size) -> fua_split(NAL, Size, NRI, Type, []).
+
+%  Start:1, End:1, R:1, Type:1,
+
+fua_split(Bin, Size, NRI, Type, Acc) ->
+  case Bin of
+    <<_StartByte, Part:Size/binary, Rest/binary>> when Acc == [] ->
+      fua_split(Rest, Size, NRI, Type, [<<0:1, NRI:2, ?NAL_FUA:5, 1:1, 0:1, 0:1, Type:5, Part/binary>>|Acc]);
+    <<Part:Size/binary, Rest/binary>> ->
+      fua_split(Rest, Size, NRI, Type, [<<0:1, NRI:2, ?NAL_FUA:5, 0:1, 0:1, 0:1, Type:5, Part/binary>>|Acc]);
+    _ when size(Bin) =< Size ->
+      lists:reverse([<<0:1, NRI:2, ?NAL_FUA:5, 0:1, 1:1, 0:1, Type:5, Bin/binary>>|Acc])
+  end.
+    
+  
+
+%% http://www.rfc-editor.org/rfc/rfc3984.txt
+to_fmtp(Body) ->
+  {_, [SPS, PPS]} = h264:unpack_config(Body),
+  {H264, _} = h264:decode_nal(SPS, #h264{}),
+  {RC, _} = h264:decode_nal(PPS, H264),
+  PLI =
+    case RC of
+      #h264{profile = Profile,
+            level = Level}
+        when (is_integer(Profile) and is_integer(Level)) ->
+        io_lib:format("profile-level-id=~2.16.0B~2.16.0B~2.16.0B;", [Profile, 16#E0, Level]);
+      _ -> []
+    end,
+  PktMode = ?H264_PKT_NONINT,
+  [
+   "packetization-mode=", integer_to_list(PktMode),";",
+   PLI,
+   "sprop-parameter-sets=",
+   base64:encode(SPS), $,, base64:encode(PPS)
+  ].
 
 %%
 %% Tests
@@ -402,16 +494,33 @@ parse_sps_for_low_profile_test() ->
 parse_sps_for_rtsp_test() ->
   ?assertEqual(#h264_sps{profile = 66, level = 20, sps_id = 0, max_frame_num = 4, width = 352, height = 288}, parse_sps(<<103,66,224,20,218,5,130,81>>)).
 
+parse_sps_40_level_test() ->
+  ?assertEqual(#h264_sps{profile = 100, level = 40, sps_id = 0, max_frame_num = 4, width = 640, height = 480}, parse_sps(<<103,100,0,40,173,0,206,80,40,15,108,4,64,
+                                       0,3,132,0,0,175,200,56,0,0,48,0,0,3,0,11,
+                                       235,194,98,247,227,0,0,6,0,0,3,0,1,125,
+                                       120,76,94,252,27,65,16,137,75>>)).
+
+sps_100_level() ->
+  <<39,100,0,31,173,136,14,67,152,32,225,12,41,10,68,7,33,204,16,112,134,20,133,
+    34,3,144,230,8,56,67,10,66,144,192,66,24,194,28,102,50,16,134,2,16,198,16,
+    227,49,144,132,48,16,134,48,135,25,140,132,34,2,17,152,206,35,194,159,17,248,
+    143,226,63,17,241,30,51,136,196,68,66,129,8,140,71,17,226,62,79,196,127,39,
+    228,248,143,17,196,100,136,180,7,128,183,96,42,144,0,0,3,0,16,0,0,3,3,198,4,
+    0,4,196,176,0,19,18,203,222,248,94,17,8,212>>.
+    
+parse_sps_100_level_test() ->
+  ?assertMatch(#h264_sps{profile = 100, level = 31, sps_id = 0, width = 960, height = 720}, parse_sps(sps_100_level())).
+
 unpack_config_1_test() ->
   Config = <<1,66,192,21,253,225,0,23,103,66,192,21,146,68,15,4,127,88,8,128,0,1,244,0,0,97,161,71,139,23,80,1,0,4,104,206,50,200>>,
   Result = [<<103,66,192,21,146,68,15,4,127,88,8,128,0,1,244,0,0,97,161,71,139,23,80>>, <<104,206,50,200>>],
   LengthSize = 2,
   ?assertEqual({LengthSize, Result}, unpack_config(Config)).
-  
+
 unpack_config_2_test() ->
   Config = <<1,77,64,30,255,224,0>>,
   ?assertEqual({4, []}, unpack_config(Config)).
-  
+
 unpack_config_3_test() ->
   Config = <<1,66,224,11,255,225,0,19,39,66,224,11,169,24,96,157,128,53,6,1,6,182,194,181,239,124,4,1,0,4,40,222,9,136>>,
   ?assertEqual({4,[<<39,66,224,11,169,24,96,157,128,53,6,1,6,182,194,181,239,124,4>>, <<40,222,9,136>>]}, unpack_config(Config)).
@@ -426,5 +535,5 @@ unpack_config_4_test() ->
 
 
 
-  
-  
+
+

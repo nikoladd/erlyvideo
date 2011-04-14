@@ -12,11 +12,10 @@
 {"src/rtmp/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 {"src/rtmp/shared_objects/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 {"src/plugins/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
-{"src/test/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 {"src/http/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 {"src/hooks/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 {"plugins/*/src/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}]}.
-{"lib/misultin/src/*", [debug_info, {outdir, "ebin"}, {i, "lib/misultin/include"}]}.
+{"src/misultin/*", [debug_info, {outdir, "ebin"}, {i, "include/misultin"}]}.
 {"deps/erlmedia/src/*", [debug_info, {outdir, "deps/erlmedia/ebin"}, {i, "deps/erlmedia/src"}]}.
 {"deps/amf/src/*", [debug_info, {outdir, "deps/amf/ebin"}, {i, "deps/amf/src"}]}.
 {"deps/shoutcast/src/*", [debug_info, {outdir, "deps/shoutcast/ebin"}, {i, "deps/shoutcast/src"}, {i, "deps"}]}.
@@ -27,5 +26,5 @@
 {"deps/rtp/src/*", [debug_info, {outdir, "deps/rtp/ebin"}, {i, "deps/rtp/src"}, {i, "deps/rtp/include"}, {i, "deps"}]}.
 {"deps/esip/src/*", [debug_info, {outdir, "deps/esip/ebin"}, {i,".."}, {i, "deps/ertp/include"}, {i,"deps/esip/include"}, {i, "deps"}]}.
 {"deps/log4erl/src/*", [debug_info, {outdir, "deps/log4erl/ebin"}, {i, "deps/log4erl/include"}]}.
-{"deps/erlydtl/src/erlydtl/*", [debug_info, {outdir, "deps/erlydtl/ebin"}, {i, "deps/erlydtl/include"}]}.
+{"test/erlang/*", [debug_info, {d, debug}, {outdir, "ebin"}, {i, "include"}, {i, ".."}]}.
 % , bin_opt_info, 

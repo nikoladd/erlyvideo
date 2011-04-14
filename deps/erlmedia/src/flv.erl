@@ -40,6 +40,7 @@
 -export([encode_audio_tag/1, encode_video_tag/1, encode_meta_tag/1, encode_tag/1,
          decode_audio_tag/1, decode_video_tag/1, decode_meta_tag/1, decode_tag/1]).
 
+-export([rtmp_tag_generator/1]).
 
 -export([read_frame/2, duration/1]).
 
@@ -129,6 +130,20 @@ frame_type(?FLV_VIDEO_FRAME_TYPEDISP_INTER_FRAME) -> disposable;
 frame_type(?FLV_VIDEO_FRAME_TYPEINTER_FRAME) -> frame;
 frame_type(?FLV_VIDEO_FRAME_TYPE_KEYFRAME) -> keyframe.
 
+
+
+rtmp_tag_generator(#video_frame{content = Content, dts = DTS} = Frame) ->
+  Tag = flv_video_frame:encode(Frame),
+  Type = case Content of
+    audio -> 8;
+    video -> 9;
+    metadata -> 18
+  end,
+  TagSize = <<(size(Tag)):24, Type>>,
+  fun(StartDTS, StreamId) ->
+    ChannelId = rtmp_lib:channel_id(Content, StreamId),
+    [rtmp:encode_id(new, ChannelId), <<(round(DTS - StartDTS)):24>>, TagSize, <<StreamId:32/little>>, Tag]
+  end.
 
 
 %%--------------------------------------------------------------------
@@ -399,7 +414,8 @@ video_size(<<_:30, 3:3,                      _:39, _/binary>>, sorensen) -> {ok,
 video_size(<<_:30, 4:3,                      _:39, _/binary>>, sorensen) -> {ok, {128, 96}};
 video_size(<<_:30, 5:3,                      _:39, _/binary>>, sorensen) -> {ok, {320, 240}};
 video_size(<<_:30, 6:3,                      _:39, _/binary>>, sorensen) -> {ok, {160, 120}};
-video_size(_, sorensen) -> {more, 9}.
+video_size(_, sorensen) -> {more, 9};
+video_size(_, _) -> {error, unknown}.
 
 
 

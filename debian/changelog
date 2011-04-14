@@ -1,3 +1,105 @@
+erlyvideo (2.8.0) unstable; urgency=low
+
+  Opensource commercial core 
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 13 Apr 2011 21:52:00 +0400
+
+erlyvideo (2.7.13) unstable; urgency=low
+
+  UDP cameras
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 13 Apr 2011 00:32:39 +0400
+
+erlyvideo (2.7.12) unstable; urgency=low
+
+  Change work with audio-only streams
+
+ -- Max Lapshin <max@maxidoors.ru>  Fri, 08 Apr 2011 13:59:38 +0400
+
+erlyvideo (2.7.11) unstable; urgency=low
+
+  Cleanup in test. Remove erlydtl. Refactored ems_media_frame
+
+ -- Max Lapshin <max@maxidoors.ru>  Thu, 07 Apr 2011 02:08:34 +0400
+
+erlyvideo (2.7.10) unstable; urgency=low
+
+  hd2500 fix
+
+ -- Max Lapshin <max@maxidoors.ru>  Fri, 01 Apr 2011 16:07:16 +0400
+
+erlyvideo (2.7.9) unstable; urgency=low
+
+  Added anonymous_seek_protection.  apps_rewrite_play X-Play-Time added
+
+ -- Max Lapshin <max@maxidoors.ru>  Sun, 27 Mar 2011 14:33:14 +0400
+
+erlyvideo (2.7.8) unstable; urgency=low
+
+  fixed metadata duration.
+
+ -- Max Lapshin <max@maxidoors.ru>  Sat, 26 Mar 2011 01:00:13 +0300
+
+erlyvideo (2.7.7) unstable; urgency=low
+
+  Axis-1031 fix
+
+ -- Max Lapshin <max@maxidoors.ru>  Fri, 25 Mar 2011 10:24:19 +0300
+
+erlyvideo (2.7.6) unstable; urgency=low
+
+  New RTP
+
+ -- Max Lapshin <max@maxidoors.ru>  Thu, 24 Mar 2011 20:25:53 +0300
+
+erlyvideo (2.7.5) unstable; urgency=low
+
+  Again SDP refactoring. Working wirecast.
+
+ -- Max Lapshin <max@maxidoors.ru>  Tue, 22 Mar 2011 08:36:43 +0300
+
+erlyvideo (2.7.4) unstable; urgency=low
+
+  Added tests for rtmp publish. H264 publish fixed
+
+ -- Max Lapshin <max@maxidoors.ru>  Sun, 20 Mar 2011 12:57:33 +0300
+
+erlyvideo (2.7.3) unstable; urgency=low
+
+  regression tests for rtsp cameras
+
+ -- Max Lapshin <max@maxidoors.ru>  Sat, 19 Mar 2011 15:31:46 +0300
+
+erlyvideo (2.7.2) unstable; urgency=low
+
+  Interlaced H264 demux
+
+ -- Max Lapshin <max@maxidoors.ru>  Thu, 17 Mar 2011 12:15:00 +0300
+
+erlyvideo (2.7.1) unstable; urgency=low
+
+  list_to_integer/2
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 16 Mar 2011 18:45:03 +0300
+
+erlyvideo (2.7.0) unstable; urgency=low
+
+  Hude #media_info refactoring
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 16 Mar 2011 18:31:32 +0300
+
+erlyvideo (2.6.7) unstable; urgency=low
+
+  proxy_media and mochijson2
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 09 Mar 2011 21:39:55 +0300
+
+erlyvideo (2.6.6) unstable; urgency=low
+
+  proxy_media fixes. HTTP leak
+
+ -- Max Lapshin <max@maxidoors.ru>  Wed, 02 Mar 2011 03:43:12 +0300
+
 erlyvideo (2.6.5) unstable; urgency=low
 
   license storage

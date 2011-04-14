@@ -3,6 +3,7 @@
 -record(ems_media, {
   url,
   name,
+  media_info,
   host,
   module,
   state,
@@ -19,11 +20,14 @@
   storage,
   format,
   
+  last_gop = undefined,
+  
   transcoder,
   trans_state,
 
   created_at,
   last_dts = 0,
+  last_dts_at,
   ts_delta,
   glue_delta,
   
@@ -34,5 +38,7 @@
   clients_timeout_ref,
   
   retry_count = 0,
-  retry_limit = 100
+  retry_limit = 100,
+  
+  frame_filters = []
 }).

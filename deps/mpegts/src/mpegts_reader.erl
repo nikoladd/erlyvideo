@@ -58,7 +58,7 @@
   demuxer,
   handler,
   consumer,
-  type,
+  codec,
   synced = false,
   ts_buffer = [],
   es_buffer = <<>>,
@@ -193,6 +193,7 @@ synchronizer(<<16#47, _:187/binary, 16#47, _/binary>> = Bin, TSLander) ->
   synchronizer(Rest, Lander);
 
 synchronizer(<<_, Bin/binary>>, TSLander) when size(Bin) >= 374 ->
+  ?D(desync),
   synchronizer(Bin, TSLander);
 
 synchronizer(Bin, TSLander) ->
@@ -294,9 +295,9 @@ pmt(<<_Pointer, 2, _SectionInd:1, 0:1, 2#11:2, SectionLength:12,
     _ProgramInfo:ProgramInfoLength/binary, PMT/binary>> = _PMTBin, #ts_lander{pids = Pids, consumer = Consumer} = TSLander, _, _) ->
   % ?D({"PMT", size(PMTBin), PMTBin, SectionLength - 13, size(PMT), PMT}),
   PMTLength = round(SectionLength - 13 - ProgramInfoLength),
-  io:format("Program ~p v~p. PCR: ~p~n", [ProgramNum, _Version, _PCRPID]),
+  ?D({"Selecting MPEG-TS program", ProgramNum}),
   % io:format("Program info: ~p~n", [ProgramInfo]),
-  ?D({"PMT", size(PMT), PMTLength, _ProgramInfo}),
+  % ?D({"PMT", size(PMT), PMTLength, _ProgramInfo}),
   Descriptors = extract_pmt(PMT, PMTLength, []),
   % io:format("Streams: ~p~n", [Descriptors]),
   Descriptors1 = lists:map(fun(#stream{pid = Pid} = Stream) ->
@@ -323,14 +324,16 @@ extract_pmt(_CRC32, 0, Descriptors) ->
 
 extract_pmt(<<StreamType, 2#111:3, Pid:13, _:4, ESLength:12, _ES:ESLength/binary, Rest/binary>>, PMTLength, Descriptors) ->
   ?D({"Pid -> Type", Pid, StreamType, _ES, PMTLength}),
-  extract_pmt(Rest, PMTLength - 5 - ESLength, [#stream{handler = pes, counter = 0, pid = Pid, type = stream_type(StreamType)}|Descriptors]).
+  extract_pmt(Rest, PMTLength - 5 - ESLength, [#stream{handler = pes, counter = 0, pid = Pid, codec = stream_codec(StreamType)}|Descriptors]).
   
 
 
-stream_type(?TYPE_VIDEO_H264) -> video;
-stream_type(?TYPE_AUDIO_AAC) -> audio;
-stream_type(?TYPE_AUDIO_AAC2) -> audio;
-stream_type(Type) -> ?D({"Unknown TS PID type", Type}), unhandled.
+stream_codec(?TYPE_VIDEO_H264) -> h264;
+stream_codec(?TYPE_VIDEO_MPEG2) -> mpeg2video;
+stream_codec(?TYPE_AUDIO_AAC) -> aac;
+stream_codec(?TYPE_AUDIO_AAC2) -> aac;
+stream_codec(?TYPE_AUDIO_MPEG2) -> mpeg2audio;
+stream_codec(Type) -> ?D({"Unknown TS PID type", Type}), unhandled.
 
 pes(#stream{demuxer = Demuxer, synced = false, pid = Pid} = Stream) ->
   receive
@@ -372,23 +375,51 @@ pes(#stream{demuxer = Demuxer, synced = true, pid = Pid, ts_buffer = Buf} = Stre
 copy_pcr(#ts_header{pcr = undefined}, Stream) -> Stream;
 copy_pcr(#ts_header{pcr = PCR}, Stream) -> Stream#stream{pcr = PCR}.
       
-pes_packet(_, #stream{type = unhandled} = Stream) -> Stream#stream{ts_buffer = []};
+pes_packet(_, #stream{codec = unhandled} = Stream) -> Stream#stream{ts_buffer = []};
 
 pes_packet(_, #stream{dts = undefined} = Stream) ->
   ?D({"No PCR or DTS yes"}),
   Stream#stream{ts_buffer = []};
 
-pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Data/binary>>, #stream{type = audio, es_buffer = Buffer} = Stream) ->
+pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Data/binary>>, #stream{codec = aac, es_buffer = Buffer} = Stream) ->
   % ?D({"Audio", Stream1#stream.pcr, Stream1#stream.dts}),
   % Stream1;
   decode_aac(Stream#stream{es_buffer = <<Buffer/binary, Data/binary>>});
   
-pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Rest/binary>>, #stream{es_buffer = Buffer, type = video} = Stream) ->
+pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Rest/binary>>, #stream{es_buffer = Buffer, codec = h264} = Stream) ->
   % ?D({"Timestamp1", Stream#stream.timestamp, Stream#stream.start_time}),
   % ?D({"Video", Stream1#stream.pcr, Stream1#stream.dts}),
   % ?D({avc, Stream#stream.dts, <<Buffer/binary, Rest/binary>>}),
-  decode_avc(Stream#stream{es_buffer = <<Buffer/binary, Rest/binary>>}).
+  decode_avc(Stream#stream{es_buffer = <<Buffer/binary, Rest/binary>>});
 
+
+pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Data/binary>>, #stream{codec = mpeg2audio, dts = DTS, pts = PTS, consumer = Consumer} = Stream) ->
+  AudioFrame = #video_frame{       
+    content = audio,
+    flavor  = frame,
+    dts     = DTS,
+    pts     = PTS,
+    body    = Data,
+	  codec	  = mpeg2audio,
+	  sound	  = {stereo, bit16, rate44}
+  },
+  % ?D({audio, Stream#stream.pcr, DTS}),
+  Consumer ! AudioFrame,
+  Stream;
+
+
+pes_packet(<<1:24, _:5/binary, Length, _PESHeader:Length/binary, Data/binary>>, #stream{codec = mpeg2video, dts = DTS, pts = PTS, consumer = Consumer} = Stream) ->
+  AudioFrame = #video_frame{       
+    content = video,
+    flavor  = frame,
+    dts     = DTS,
+    pts     = PTS,
+    body    = Data,
+	  codec	  = mpeg2video
+  },
+  % ?D({audio, Stream#stream.pcr, DTS}),
+  Consumer ! AudioFrame,
+  Stream.
 
 pes_timestamp(<<_:7/binary, 2#11:2, _:6, PESHeaderLength, PESHeader:PESHeaderLength/binary, _/binary>>) ->
   <<2#0011:4, Pts1:3, 1:1, Pts2:15, 1:1, Pts3:15, 1:1, 
@@ -476,7 +507,7 @@ normalize_timestamp(Stream) ->
 
 % <<18,16,6>>
 decode_aac(#stream{send_audio_config = false, es_buffer = AAC, dts = DTS, pts = PTS, consumer = Consumer} = Stream) ->
-  Config = aac:config(AAC),
+  Config = aac:adts_to_config(AAC),
   AudioConfig = #video_frame{       
    	content = audio,
    	flavor  = config,
@@ -541,7 +572,7 @@ handle_nal(#stream{consumer = Consumer, dts = DTS, pts = PTS, h264 = H264} = Str
     _ -> ok
   end,
   lists:foreach(fun(Frame) ->
-    % ?D({Frame#video_frame.flavor, round(PTS - DTS)}),
+    % ?D({Frame#video_frame.flavor, round(DTS)}),
     Consumer ! Frame#video_frame{dts = DTS, pts = PTS}
   end, Frames),
   Stream#stream{h264 = H264_1}.

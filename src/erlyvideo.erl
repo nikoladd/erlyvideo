@@ -33,7 +33,7 @@
 -export([call_modules/2]).
 -export([stats/1]).
 -export([vhosts/0]).
--export([main/1]).
+-export([main/1, test/0]).
 
 
 -export([edoc/0, edoc/1]).
@@ -45,6 +45,41 @@ main([]) ->
   receive
     {'DOWN', Ref, process, _Client, _Reason} -> ok
   end.
+
+
+test() ->
+  % ems_network_lag_monitor,
+  % ems_media,
+  % ems_media_clients,
+  
+  eunit:test([
+    ems,
+    amf0_tests,
+    amf3_tests,
+    aac,
+    h264,
+    mp4,
+    mp4_writer,
+    flv_video_frame,
+    sdp,
+    rtp_decoder,
+    http_uri2,
+    packet_codec,
+    srt_parser,
+    mpeg2_crc32,
+    mpegts_reader,
+    rtmp,
+    rtmp_handshake,
+    rtsp,
+    ems_media_clients,
+    ems_media_timeout_tests,
+    ems_media_flow_tests,
+    ems_test_file_reading,
+    rtmp_publish_tests,
+    rtmp_read_tests,
+    ems_license_client
+  ]).
+
 
 
 start(normal, []) ->
@@ -75,6 +110,8 @@ vhosts() ->
 start() ->
 	error_logger:info_report("Starting Erlyvideo ..."),
   ibrowse:start(),
+  ems_license_client:load(),
+	
   ems_log:start(),
 	application:start(crypto),
 	application:start(rtmp),
@@ -87,13 +124,10 @@ start() ->
 
 	application:start(erlyvideo),
 	
-	ems_license_client:restore(),
-	ems_license_client:ping([sync]),
-	
   start_http(),
   start_rtmp(),
   mpegts:start(),
-  ertp:start(),
+  rtp:start(),
   rtsp:start(),
 	start_modules(),
   media_provider:start_static_streams(),
