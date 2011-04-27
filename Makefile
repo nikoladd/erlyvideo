@@ -1,21 +1,21 @@
-include debian/version.mk
+include version.mk
 ERLANG_ROOT := $(shell erl -eval 'io:format("~s", [code:root_dir()])' -s init stop -noshell)
 ERLDIR=$(ERLANG_ROOT)/lib/erlyvideo-$(VERSION)
 DESTROOT:=$(CURDIR)/debian/erlyvideo
-ERL_LIBS:=deps:plugins
+ERL_LIBS:=apps:deps:plugins
 
 
 
 # NIFDIR := `erl -eval 'io:format("~s", [code:lib_dir(erts,include)])' -s init stop -noshell| sed s'/erlang\/lib\//erlang\//'`
-# 
+#
 # ifeq ($(shell uname), Linux)
 # NIF_FLAGS := gcc -shared -O3 -fPIC -fno-common -Wall
 # endif
-# 
+#
 # ifeq ($(shell uname), Darwin)
 # NIF_FLAGS := cc -arch i386 -arch x86_64 -pipe -bundle -undefined dynamic_lookup -O3 -fPIC -fno-common -Wall
 # endif
-# 
+#
 # ifeq ($(shell uname), FreeBSD)
 # NIF_FLAGS := cc -shared -O3 -fPIC -fno-common -Wall
 # endif
@@ -29,10 +29,11 @@ update:
 	git pull
 
 compile:
-	ERL_LIBS=$(ERL_LIBS) erl -make
-	(cd deps/ibrowse && make)
+	./rebar compile
 
-
+release: compile
+	./rebar generate force=1
+	chmod +x erlyvideo/bin/erlyvideo
 
 ebin/mmap.so: src/core/mmap.c
 	$(NIF_FLAGS) -o $@ $< -I $(NIFDIR) || touch $@
@@ -40,13 +41,12 @@ ebin/mmap.so: src/core/mmap.c
 archive:
 	git archive --prefix=erlyvideo-$(VERSION)/ v$(VERSION) | gzip -9 > ../erlyvideo-$(VERSION).tar.gz
 
-ebin:
-	mkdir ebin
+tgz: release
+	tar zcvf erlyvideo-$(VERSION).tar.gz erlyvideo
+
 
 clean:
-	rm -fv ebin/*.beam
-	rm -fv deps/*/ebin/*.beam
-	rm -fv lib/*/ebin/*.beam
+	./rebar clean
 	rm -fv plugins/*/ebin/*.beam
 	rm -fv erl_crash.dump
 
@@ -56,8 +56,8 @@ clean-doc:
 	rm -fv doc/*.css
 
 
-run: priv/erlyvideo.conf priv/log4erl.conf
-	contrib/erlyctl run
+run: priv/erlyvideo.conf priv/log4erl.conf compile
+	ERL_LIBS=apps:..:deps erl -boot start_sasl -s erlyvideo -config files/app.config
 
 priv/log4erl.conf: priv/log4erl.conf.sample
 	[ -f priv/log4erl.conf ] || cp priv/log4erl.conf.sample priv/log4erl.conf
@@ -65,30 +65,24 @@ priv/log4erl.conf: priv/log4erl.conf.sample
 priv/erlyvideo.conf: priv/erlyvideo.conf.sample
 	[ -f priv/erlyvideo.conf ] || cp priv/erlyvideo.conf.sample priv/erlyvideo.conf
 
-start: priv/erlyvideo.conf
-	contrib/erlyctl start
 
-install: compile
-	mkdir -p $(DESTROOT)/var/lib/erlyvideo/movies
-	mkdir -p $(DESTROOT)/var/lib/erlyvideo/plugins
-	mkdir -p $(DESTROOT)$(ERLDIR)
-	cp -r ebin src include Emakefile $(DESTROOT)$(ERLDIR)/
-	mkdir -p $(DESTROOT)/usr/bin/
-	cp contrib/reverse_mpegts $(DESTROOT)/usr/bin/reverse_mpegts
-	cp contrib/erlyctl.debian $(DESTROOT)/usr/bin/erlyctl
-	mkdir -p $(DESTROOT)/etc/init.d/
-	ln -s /usr/bin/erlyctl $(DESTROOT)/etc/init.d/erlyvideo
-	cp -r wwwroot $(DESTROOT)/var/lib/erlyvideo/
-	mkdir -p $(DESTROOT)/var/log/erlyvideo
-	mkdir -p $(DESTROOT)/etc/erlyvideo
-	cp priv/erlyvideo.conf.debian $(DESTROOT)/etc/erlyvideo/erlyvideo.conf
-	cp priv/log4erl.conf.debian $(DESTROOT)/etc/erlyvideo/log4erl.conf
-	cp priv/production.config.debian $(DESTROOT)/etc/erlyvideo/production.config
-	mkdir -p $(DESTROOT)/var/cache/erlyvideo/licensed
-	chown erlyvideo.erlyvideo $(DESTROOT)/var/lib/erlyvideo/movies
-	chown erlyvideo.erlyvideo $(DESTROOT)/var/cache/erlyvideo/licensed
-	for i in deps/amf deps/log4erl deps/erlmedia deps/mpegts deps/rtmp deps/rtp deps/rtsp deps/ibrowse ; do (cd $$i; make DESTROOT=$(DESTROOT) ERLANG_ROOT=$(ERLANG_ROOT) VERSION=$(VERSION) install) ; done
+version:
+	echo "VERSION=$(VER)" > version.mk
+	git add version.mk
+	git commit -m "Version $(VER)"
+	# git tag -s v$(VER) -m "version $(VER)"
 
+packages: release
+	rm -rf tmproot
+	tar zcf erlyvideo-$(VERSION).tgz erlyvideo
+	mkdir -p tmproot/opt
+	mv erlyvideo tmproot/opt/
+	mkdir -p tmproot/etc/init.d/
+	cp contrib/erlyvideo tmproot/etc/init.d/
+	cd tmproot && \
+	fpm -s dir -t deb -n erlyvideo -v $(VERSION) -m "Max Lapshin <max@maxidoors.ru>" etc/init.d/erlyvideo opt && \
+	fpm -s dir -t rpm -n erlyvideo -v $(VERSION) -m "Max Lapshin <max@maxidoors.ru>" etc/init.d/erlyvideo opt 
+	mv tmproot/*.deb tmproot/*.rpm .
 
 .PHONY: doc debian compile
 
