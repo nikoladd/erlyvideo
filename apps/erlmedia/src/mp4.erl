@@ -41,7 +41,8 @@
 -export([btrt/2, stsz/2, stts/2, stsc/2, stss/2, stco/2, co64/2, smhd/2, minf/2, ctts/2, udta/2]).
 -export([mp4a/2, mp4v/2, avc1/2, s263/2, samr/2, free/2]).
 -export([hdlr/2, vmhd/2, dinf/2, dref/2, 'url '/2, 'pcm '/2, 'spx '/2, '.mp3'/2]).
--export([extract_language/1]).
+-export([meta/2, ilst/2, covr/2, data/2, nam/2, alb/2]).
+-export([extract_language/1,get_coverart/1]).
 
 -export([fill_track/9]).
 
@@ -66,6 +67,13 @@ open(Reader, Options) ->
   #mp4_media{tracks = Tracks} = Mp4Media1 = read_srt_files(Mp4Media, proplists:get_value(url, Options)),
   Index = build_index(Tracks),
   {ok, Mp4Media1#mp4_media{index = Index, reader = Reader, tracks = list_to_tuple(Tracks)}}.
+
+get_coverart(Reader) ->
+  {ok, MP4_Media} = read_header(#mp4_media{}, Reader, 0),
+  case proplists:get_value(cover_art,MP4_Media#mp4_media.additional,undefined) of
+    undefined -> <<>>;
+    Bin -> Bin
+  end.
 
 read_header(Reader) ->
   read_header(#mp4_media{}, Reader, 0).
@@ -107,9 +115,6 @@ subtitles_to_mp4_frames(Subtitles) ->
   [#mp4_frame{id = Id, dts = From, pts = To, size = size(Text), codec = srt, body = Text, content = text} ||
    #srt_subtitle{id = Id, from = From, to = To, text = Text} <- Subtitles].
 
-  
-
-
 read_header(#mp4_media{additional = Additional} = Mp4Media, {Module, Device} = Reader, Pos) -> 
   case read_atom_header(Reader, Pos) of
     eof -> {ok, Mp4Media};
@@ -123,27 +128,26 @@ read_header(#mp4_media{additional = Additional} = Mp4Media, {Module, Device} = R
     {atom, AtomName, Offset, Length} -> 
       % ?D({"Root atom", AtomName, Length}),
       {ok, AtomData} = Module:pread(Device, Offset, Length),
-      NewMedia = case atom_to_binary(AtomName, utf8) of
+      NewMedia = case atom_to_binary(AtomName, latin1) of
         <<"EV", _/binary>> ->
           Mp4Media#mp4_media{additional = [{AtomName,AtomData}| Additional]};
         _ ->
           case erlang:function_exported(mp4, AtomName, 2) of
             true -> mp4:AtomName(AtomData, Mp4Media);
-            false -> ?D({"Unknown atom", AtomName}), Mp4Media
+            false -> Mp4Media
           end
       end,
       read_header(NewMedia, Reader, Offset + Length)
   end.
 
-
 read_atom_header({Module, Device}, Pos) ->
   case Module:pread(Device, Pos, 8) of
     {ok, <<0:32, AtomName/binary>>} ->
-      {atom, binary_to_atom(AtomName, utf8), Pos + 8, all_file};
+      {atom, binary_to_atom(AtomName, latin1), Pos + 8, all_file};
     {ok, <<1:32, AtomName/binary>>} ->
       case Module:pread(Device, Pos+4, 12) of
         {ok, <<AtomName:4/binary, AtomLength:64>>} when AtomLength >= 12 -> 
-          {atom, binary_to_atom(AtomName, utf8), Pos + 16, AtomLength - 16};
+          {atom, binary_to_atom(AtomName, latin1), Pos + 16, AtomLength - 16};
         eof ->
           eof;
         {ok, Bin} ->
@@ -154,7 +158,7 @@ read_atom_header({Module, Device}, Pos) ->
       end;
     {ok, <<AtomLength:32, AtomName/binary>>} when AtomLength >= 8 ->
       % ?D({"Atom", binary_to_atom(AtomName, latin1), Pos, AtomLength}),
-      {atom, binary_to_atom(AtomName, utf8), Pos + 8, AtomLength - 8};
+      {atom, binary_to_atom(AtomName, latin1), Pos + 8, AtomLength - 8};
     eof ->
       eof;
     {ok, Bin} ->
@@ -183,7 +187,7 @@ read_frame(#mp4_media{tracks = Tracks, index = Index} = Media, #frame_id{id = Id
     <<_:IndexOffset/binary, Audio, _:1, AudioId:23, _/binary>> -> 
       (unpack_frame(element(Audio,Tracks), AudioId))#mp4_frame{next_id = FrameId#frame_id{id = Id+1}, content = audio};
     <<_:IndexOffset/binary, Text, _:1, TextId:23, _/binary>> -> 
-      % ?D({read_text,Text,TextId}),
+       %?D({read_text,Text,TextId}),
       (unpack_frame(element(Text,Tracks), TextId))#mp4_frame{next_id = FrameId#frame_id{id = Id+1}, content = text};
     <<_:IndexOffset/binary, Video, _:1, VideoId:23, _/binary>> -> 
       (unpack_frame(element(Video,Tracks), VideoId))#mp4_frame{next_id = FrameId#frame_id{id = Id+1}, content = video};
@@ -212,7 +216,6 @@ frame_count(undefined) -> 0;
 frame_count(#mp4_track{frames = Frames}) -> size(Frames) div ?FRAMESIZE;
 frame_count(Frames) -> size(Frames) div ?FRAMESIZE.
 
-  
 parse_atom(<<>>, Mp4Parser) ->
   Mp4Parser;
   
@@ -222,16 +225,21 @@ parse_atom(Atom, _) when size(Atom) < 4 ->
 parse_atom(<<AllAtomLength:32, BinaryAtomName:4/binary, AtomRest/binary>>, Mp4Parser) when (size(AtomRest) >= AllAtomLength - 8) ->
   AtomLength = AllAtomLength - 8,
   <<Atom:AtomLength/binary, Rest/binary>> = AtomRest,
-  AtomName = binary_to_atom(BinaryAtomName, utf8),
+  AtomName = case binary:bin_to_list(BinaryAtomName) of
+   [169|Value] -> 
+     binary_to_atom(binary:list_to_bin(Value),latin1);
+   _ValidValue ->
+     binary_to_atom(BinaryAtomName,latin1)
+  end,
   NewMp4Parser = case erlang:function_exported(?MODULE, AtomName, 2) of
     true -> ?MODULE:AtomName(Atom, Mp4Parser);
-    % false -> ?D({"Unknown atom", AtomName}), Mp4Parser
     false -> Mp4Parser
+    % false -> Mp4Parser
   end,
   parse_atom(Rest, NewMp4Parser);
   
 parse_atom(<<AllAtomLength:32, BinaryAtomName:4/binary, _Rest/binary>>, Mp4Parser) ->
-  ?D({"Invalid atom", AllAtomLength, binary_to_atom(BinaryAtomName, utf8), size(_Rest)}),
+  ?D({"Invalid atom", AllAtomLength, binary_to_atom(BinaryAtomName, latin1), size(_Rest)}),
   Mp4Parser;
 
 parse_atom(<<0:32>>, Mp4Parser) ->
@@ -268,8 +276,43 @@ mvhd(<<0:32, CTime:32, MTime:32, TimeScale:32, Duration:32, Rate:16, _RateDelim:
   % ?D(Meta),
   Media#mp4_media{timescale = TimeScale, duration = Duration/TimeScale}.
 
-udta(Value, Media) ->
-  parse_atom(Value, Media).
+udta(UDTA, Media) ->
+  parse_atom(UDTA, Media).
+
+meta(<<0:32, Meta/binary>>, #mp4_media{} = Media) ->
+  parse_atom(Meta, Media).
+
+ilst(ILST, #mp4_media{} = Media) ->
+  parse_atom(ILST, Media).
+
+covr(Data, #mp4_media{additional = Add} = Media) ->
+  CoverArt = parse_atom(Data, covr),
+  Media#mp4_media{additional = [{cover_art, CoverArt}|Add]}.
+
+nam(Data, #mp4_media{additional = Add} = Media) ->
+  Name = parse_atom(Data, name),
+  Metadata = case proplists:get_value(name, Add, undefined) of
+    undefined ->
+      Name;
+    AnotherData -> 
+      <<AnotherData/binary,"-",Name/binary>> 
+  end,
+  Media#mp4_media{additional = [{name, Metadata}|Add]}.
+
+alb(Data, #mp4_media{additional = Add} = Media) ->
+  Name = parse_atom(Data, name),
+  Metadata = case proplists:get_value(name, Add, undefined) of
+    undefined ->
+      Name;
+    AnotherData -> 
+      <<AnotherData/binary,"-",Name/binary>> 
+  end,
+  Media#mp4_media{additional = [{name, Metadata}|Add]}.
+
+data(<<_Flags:32, 0:32, Data/binary>>, _Meaning) ->
+  Data.
+
+% '----'(Meta, #mp4_media{} = Media) ->
 
 % Track box
 trak(<<>>, MediaInfo) ->
@@ -337,7 +380,7 @@ extract_language(<<L1:5, L2:5, L3:5>>) ->
 
 
 %% Handler Reference Box
-hdlr(<<0:32, 0:32, "vide", 0:96, NameNull/binary>>, Mp4Track) ->
+hdlr(<<0:32, 0:32, "vide", _Reserved:8/binary, NameNull/binary>>, Mp4Track) ->
   Len = (size(NameNull) - 1),
   _Name = case NameNull of
     <<N:Len/binary, 0>> -> N;
@@ -345,7 +388,7 @@ hdlr(<<0:32, 0:32, "vide", 0:96, NameNull/binary>>, Mp4Track) ->
   end,
   Mp4Track#mp4_track{content = video};
 
-hdlr(<<0:32, 0:32, "soun", 0:96, NameNull/binary>>, Mp4Track) ->
+hdlr(<<0:32, 0:32, "soun", _Reserved:8/binary, NameNull/binary>>, Mp4Track) ->
   Len = (size(NameNull) - 1),
   _Name = case NameNull of
     <<N:Len/binary, 0>> -> N;
@@ -353,7 +396,7 @@ hdlr(<<0:32, 0:32, "soun", 0:96, NameNull/binary>>, Mp4Track) ->
   end,
   Mp4Track#mp4_track{content = audio};
 
-hdlr(<<0:32, 0:32, "hint", 0:96, NameNull/binary>>, Mp4Track) ->
+hdlr(<<0:32, 0:32, "hint", _Reserved:8/binary, NameNull/binary>>, Mp4Track) ->
   Len = (size(NameNull) - 1),
   _Name = case NameNull of
     <<N:Len/binary, 0>> -> N;
@@ -361,7 +404,16 @@ hdlr(<<0:32, 0:32, "hint", 0:96, NameNull/binary>>, Mp4Track) ->
   end,
   Mp4Track#mp4_track{content = hint};
 
-hdlr(<<0:32, 0:32, Handler:4/binary, 0:96, NameNull/binary>>, Mp4Track) ->
+hdlr(<<0:32, 0:32, Handler:4/binary, _Reserved:8/binary, NameNull/binary>>, #mp4_media{} = Mp4Media) ->
+  Len = (size(NameNull) - 1),
+  Name = case NameNull of
+    <<N:Len/binary, 0>> -> N;
+    _ -> NameNull
+  end,
+  ?D({hdlr, Handler, Name}),
+  Mp4Media;
+
+hdlr(<<0:32, 0:32, Handler:4/binary, _Reserved:8/binary, NameNull/binary>>, #mp4_track{} = Mp4Track) ->
   Len = (size(NameNull) - 1),
   Name = case NameNull of
     <<N:Len/binary, 0>> -> N;
@@ -369,7 +421,6 @@ hdlr(<<0:32, 0:32, Handler:4/binary, 0:96, NameNull/binary>>, Mp4Track) ->
   end,
   ?D({hdlr, Handler, Name}),
   Mp4Track#mp4_track{content = binary_to_atom(Handler, latin1)}.
-  
   
 % SMHD atom
 smhd(<<0:8, _Flags:3/binary, 0:16/big-signed-integer, _Reserve:2/binary>>, Mp4Track) ->
@@ -391,6 +442,7 @@ vmhd(<<_Version:32, _Mode:16, _R:16, _G:16, _B:16>>, Mp4Track) ->
 dinf(Atom, Mp4Track) ->
   parse_atom(Atom, Mp4Track).
   
+
 dref(<<0:32, _Count:32, Atom/binary>> = _Dref, Mp4Track) ->
   parse_atom(Atom, Mp4Track).
 
@@ -417,6 +469,7 @@ mp4v(_T, Mp4Track) ->
 
 '.mp3'(_, Mp4Track) ->
   Mp4Track#mp4_track{data_format = mp3}.
+
 
 avc1(<<_Reserved:6/binary, _RefIndex:16, _Unknown1:16/binary, Width:16, Height:16,
       HorizRes:16, _:16, VertRes:16, _:16, _FrameCount:16, _CompressorName:32/binary,
@@ -841,7 +894,22 @@ esds_tag1_test() ->
 esds_tag2_test() ->
   ?assertEqual(#esds{object_type = aac, stream_type = 21, buffer_size = 428, max_bitrate = 139608, avg_bitrate = 101944, specific = <<18,16>>}, config_from_esds_tag(<<3,25,0,0,0,4,17,64,21,0,1,172,0,2,33,88,0,1,142,56,5,2,18,16,6,1,2>>)).
 
+get_coverart_validMeta_test () ->
+  {ok,Dev} = file:open("test/files/tag_coverart.mp4",[read,raw,binary]),
+  Reader = {file,Dev},
+  Metadata = get_coverart(Reader),
+  ?assertMatch(<<_:6/binary,"JFIF",_/binary>>, Metadata).
 
+get_coverart_sizeMeta_test () ->
+  {ok,Dev} = file:open("test/files/tag_coverart.mp4",[read,raw,binary]),
+  Reader = {file,Dev},
+  Metadata = get_coverart(Reader),
+  ?assertEqual(114121,size(Metadata)).
 
+get_coverart_unvalid_test () ->
+  {ok,Dev} = file:open("test/files/without_coverart.mp4",[read,raw,binary]),
+  Reader = {file,Dev},
+  Metadata = get_coverart(Reader),
+  ?assertEqual(<<>>,Metadata).
 
 

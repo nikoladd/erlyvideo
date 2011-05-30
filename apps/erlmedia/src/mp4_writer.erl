@@ -62,7 +62,7 @@
 -include("log.hrl").
 
 -export([write/2, write/3, pack_language/1, dump_media/2]).
--export([init/2, handle_frame/2]).
+-export([init/2, handle_frame/2, write_frame/2]).
 
 -export([pack_compositions/1]).
 
@@ -187,7 +187,8 @@ init(Writer, Options) ->
   
 
 
-  
+write_frame(Frame, Writer) ->
+  handle_frame(Frame, Writer).
     
 handle_frame(#video_frame{flavor = command}, Convertor) ->
   {ok, Convertor};
@@ -362,7 +363,7 @@ video_track(#convertor{video_frames = RevVideo, duration = DTS, url = URL} = Con
           {stco, pack_chunk_offsets(RevVideo)},
           {stts, pack_durations(RevVideo)},
           {stsz, pack_sizes(RevVideo)},
-          % {ctts, pack_compositions(RevVideo)},
+          {ctts, pack_compositions(RevVideo)},
           {stss, pack_keyframes(RevVideo)}
         ]}
       ]}
@@ -577,14 +578,20 @@ pack_durations(ReverseFrames) ->
 	List = [<<1:32, Duration:32>> || Duration <- Durations],
 	[<<0:32, (length(List)):32>>, List].
 
+pack_durations([#video_frame{dts = DTS1}, #video_frame{dts = DTS2, content = Content} = F|ReverseFrames], []) when DTS1 > DTS2 ->
+  Duration = round((DTS1 - DTS2)*scale_for_content(Content)),
+	pack_durations([F|ReverseFrames], [Duration, Duration]);
+
+
 pack_durations([#video_frame{dts = DTS, pts = PTS}, #video_frame{dts = DTS1, content = Content} = F|ReverseFrames], Acc) when DTS =< DTS1->
 	pack_durations([F#video_frame{dts = DTS - 1, pts = PTS - DTS1 + DTS}|ReverseFrames], [round(scale_for_content(Content)) | Acc]);
 
-pack_durations([#video_frame{dts = DTS1}, #video_frame{dts = DTS2, content = Content} = F|ReverseFrames], Acc) when DTS1 > DTS2 ->
-	pack_durations([F|ReverseFrames], [round((DTS1 - DTS2)*scale_for_content(Content)) | Acc]);
+pack_durations([#video_frame{dts = DTS1}, #video_frame{dts = DTS2, content = Content}], Acc) when DTS1 > DTS2 ->
+	[round((DTS1 - DTS2)*scale_for_content(Content)) | Acc];
 
-pack_durations([#video_frame{}], Acc) ->
-	[0 | Acc].
+pack_durations([#video_frame{dts = DTS1}, #video_frame{dts = DTS2, content = Content} = F|ReverseFrames], Acc) when DTS1 > DTS2 ->
+	pack_durations([F|ReverseFrames], [round((DTS1 - DTS2)*scale_for_content(Content)) | Acc]).
+
 
 scale_for_content(video) -> ?H264_SCALE;
 scale_for_content(audio) -> ?AUDIO_SCALE.

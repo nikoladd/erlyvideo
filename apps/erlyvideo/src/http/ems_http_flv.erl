@@ -24,6 +24,7 @@
 -module(ems_http_flv).
 -author('Max Lapshin <max@maxidoors.ru>').
 -include("../ems.hrl").
+-include("../log.hrl").
 
 -export([http/4]).
 
@@ -39,7 +40,7 @@ http(Host, 'GET', ["flv" | Name] = Path, Req) ->
   Req:stream(head, [{"Content-Type", "video/x-flv"}, {"Connection", "close"}]),
   case media_provider:play(Host, string:join(Name, "/"), Seek) of
     {ok, Stream} ->
-      flv_writer:init(fun(Data) -> Req:stream(Data) end, Stream, []),
+      flv_writer:init(fun(Data) -> Req:stream(Data) end, Stream, [{sort_buffer, 0}]),
       ems_media:stop(Stream),
       Req:stream(close),
       ok;
@@ -50,6 +51,16 @@ http(Host, 'GET', ["flv" | Name] = Path, Req) ->
       Req:stream(io_lib:format("500 Internal Server Error.~n Failed to start video player: ~p~n ~p: ~p", [Reason, Name, Req])),
       Req:stream(close)
   end;
+
+http(Host, 'PUT', ["flv" | Name] = Path, Req) ->
+  {Module, Function} = ems:check_app(Host, auth, 3),
+  _Session = Module:Function(Host, http, proplists:get_value('Authorization', Req:get(headers))),
+
+  ems_log:access(Host, "PUT ~p ~s /~s", [Req:get(peer_addr), "-", string:join(Path, "/")]),
+  {ok, Stream} = media_provider:open(Host, Name, [{type, http_flv},{passive,true}]),
+  ems_media:set_socket(Stream, Req:socket()),
+  ok;  
+  
 
 http(_Host, _Method, _Path, _Req) ->
   unhandled.

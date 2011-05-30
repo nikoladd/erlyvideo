@@ -264,10 +264,19 @@ internal_open(Host, Name, Opts) ->
     alias ->
       NewName = proplists:get_value(url, Opts2),
       ?D({"Aliasing", Name, NewName}),
-      internal_open(Host, NewName, Opts1);
+      % internal_open(Host, NewName, Opts1);
+	  alias_open(Host, NewName, Opts1);
     _ ->
       start_new_media_entry(Host, Name, Opts2)
   end.
+  
+alias_open(Host, Name, Opts) ->
+	case proplists:get_value(alias_name, Opts) of
+		Name -> {notfound, <<"Alias loop", Name/binary>>};
+		_Else -> 
+			% try the FULL cycle again
+			open(Host, Name, [{alias_name, Name}|Opts])
+	end.
 
 lists_except(Opts, []) ->
   Opts;

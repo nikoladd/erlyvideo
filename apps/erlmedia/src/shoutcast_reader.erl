@@ -122,12 +122,12 @@ handle_info({tcp, Socket, Bin}, #shoutcast{buffer = <<>>} = State) ->
   inet:setopts(Socket, [{active,once}]),
   {noreply, decode(State#shoutcast{buffer = Bin})};
 
+handle_info(#video_frame{flavor = config, content = audio} = Frame, State) ->
+  {noreply, send_frame(Frame, State#shoutcast{audio_config = Frame})};
+
 handle_info({tcp, Socket, Bin}, #shoutcast{buffer = Buffer} = State) ->
   inet:setopts(Socket, [{active,once}]),
   {noreply, decode(State#shoutcast{buffer = <<Buffer/binary, Bin/binary>>})};
-
-handle_info(#video_frame{flavor = config, content = audio} = Frame, State) ->
-  {noreply, send_frame(Frame, State#shoutcast{audio_config = Frame})};
 
 handle_info(#video_frame{} = Frame, State) ->
   {noreply, send_frame(Frame, State)};
@@ -195,6 +195,7 @@ decode(#shoutcast{state = unsynced_body, sync_count = SyncCount, format = mp3, b
 
 
 decode(#shoutcast{state = unsynced_body, format = aac, sync_count = SyncCount, buffer = <<_, Rest/binary>>} = State) ->
+   %?D({"Decode"}),
   case aac:unpack_adts(State#shoutcast.buffer) of
     {ok, _Frame, Second} ->
       ?D({"Presync AAC"}),
@@ -207,7 +208,7 @@ decode(#shoutcast{state = unsynced_body, format = aac, sync_count = SyncCount, b
           decode(State#shoutcast{buffer = Rest, sync_count = SyncCount + 1});
         {ok, _, _} ->
           ?D({"Synced AAC"}),
-          AACConfig = aac:config_from_adts(Second),
+          AACConfig = aac:adts_to_config(Second),
           AudioConfig = #video_frame{       
            	content   = audio,
            	flavor    = config,
@@ -238,7 +239,7 @@ decode(#shoutcast{state = unsynced_body, buffer = <<>>} = State) ->
   State;
 
 decode(#shoutcast{state = body, format = aac, buffer = Data, timestamp = Timestamp, sample_rate = SampleRate} = State) ->
-  % ?D({"Decode"}),
+   %?D({"Decode"}),
   case aac:unpack_adts(Data) of
     {ok, Packet, Rest} ->
       Frame = #video_frame{       
@@ -322,3 +323,68 @@ terminate(_Reason, _State) ->
 %%-------------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+
+-include_lib("eunit/include/eunit.hrl").
+
+shoutcast_aac_config_test () ->
+  {ok,Dev} = file:open("test/files/shoutcast_aac.dmp",[read,raw,binary]),
+  {ok,Data} = file:pread(Dev,0,1024),
+  decode(#shoutcast{state = unsynced_body,buffer = Data, consumer = self()}),
+  Guard = #video_frame{content = audio,dts = 0,pts = 0,codec = aac,flavor = config, sound = {stereo,bit16,rate44},body = <<18,16>>},
+  ?assertEqual(Guard, get_frame(config)).
+
+shoutcast_aac_frame_test () ->
+  {ok,Dev} = file:open("test/files/shoutcast_aac.dmp",[read,raw,binary]),
+  {ok,Data} = file:pread(Dev,0,1024),
+  decode(#shoutcast{state = unsynced_body,buffer = Data, consumer = self()}),
+  Frame = get_frame(frame),
+  ?assertMatch(<<33,_/binary>>, Frame#video_frame.body).
+
+get_frame(Match) ->
+  receive 
+   #video_frame{flavor = Match} = Frame -> Frame;
+   #video_frame{} -> get_frame(Match)
+  end.  
+
+count_frame_aac_test () ->
+  TrueCount = 142,
+  {ok,Dev} = file:open("test/files/shoutcast_aac.dmp",[read,raw,binary]),
+  {ok,Data} = file:pread(Dev,0,1024),
+  decode(#shoutcast{state = unsynced_body,buffer = Data, consumer = self()}),
+  CurCount = count_frame(0),
+  ?assertEqual(TrueCount,CurCount).
+
+dts_play_test () ->
+  {ok,Dev} = file:open("test/files/shoutcast_aac.dmp",[read,raw,binary]),
+  {ok,Data} = file:pread(Dev,0,1024),
+  decode(#shoutcast{state = unsynced_body,buffer = Data, consumer = self()}),
+  Frames = aac_frame([]),
+  delta_dts(Frames).
+
+delta_dts([]) ->
+  ok;
+
+delta_dts([#video_frame{}]) ->
+  ok;
+
+delta_dts([Frame|Frames]) ->
+  [NextFrame|_] = Frames,
+  Delta = NextFrame#video_frame.dts - Frame#video_frame.dts,
+  ?D(Delta),
+  true = Delta < 24 andalso Delta > 22,
+  delta_dts(Frames).
+  
+aac_frame(Frames) ->
+  receive 
+   #video_frame{flavor = frame} = Frame -> aac_frame([Frame|Frames]);
+   _Else -> aac_frame(Frames)
+   after 20 -> lists:reverse(Frames)
+  end.
+  
+
+count_frame (Count) ->
+  receive 
+    #video_frame{} -> count_frame(Count+1)
+    after 20 -> Count
+  end.
