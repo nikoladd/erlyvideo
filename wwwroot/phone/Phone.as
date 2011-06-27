@@ -1,6 +1,7 @@
 private var nc:NetConnection;
 private var ns_in:NetStream;
 private var ns_out:NetStream;
+import mx.controls.Alert;
 
 [Bindable]
 private var registerEnabled:Boolean = false;
@@ -41,22 +42,72 @@ private function handleStatus(evt:NetStatusEvent) : void
       var obj:Object = evt.info.description;
       ns_out = new NetStream(nc);
       
-      var m:Microphone = Microphone.getMicrophone();
+      var m:Microphone;
+/*      if (m['getEnhancedMicrophone'] && false) {
+        m = Microphone.getEnhancedMicrophone();
+
+        var options:MicrophoneEnhancedOptions = new MicrophoneEnhancedOptions();
+        options.mode = MicrophoneEnhancedMode.FULL_DUPLEX;
+        options.autoGain = false;
+        options.echoPath = 128;
+        options.nonLinearProcessing = true;
+        m.enhancedOptions = options;
+      } else {
+        m = Microphone.getMicrophone();
+      }
+*/
+
+      m = Microphone.getMicrophone();
+      
+      if(!m) {
+        Alert.show("Cannot enable microphone");
+      }
+
+      var cam:Camera;
+      cam = Camera.getCamera();
+      cam.setMode(320, 240, 15);
+      cam.setQuality(0, 90);  
+      
+      
 			//m.rate = 44;
       m.codec = "Speex";
 			m.gain = 80;
 			m.rate = speexWB ? 16000 : 8000;
+			m.framesPerPacket = 1;
       ns_out.attachAudio(m);
+      ns_out.attachCamera(cam);
       ns_out.publish(obj.out_stream);
+      
+      
       
       ns_in = new NetStream(nc);
       ns_in.play(obj.in_stream);
+      videoContainer.video.attachNetStream(ns_in);
+      var in_client:Object = new Object();
+      in_client.onMetaData = function(obj:Object):void {
+      }
+      ns_in.client = in_client;
       
     default:
       registerEnabled = false;
       callEnabled = false;
       break;
   }
+}
+
+public function onMetaData(object:Object) : void
+{
+  
+}
+
+public function unregister() : void
+{
+  nc.call("unregister", null, registerNumber.text);
+}
+
+public function bye() : void
+{
+  nc.call("bye", null);
 }
 
 public function register() : void

@@ -26,7 +26,7 @@
 -include("../log.hrl").
 -include_lib("kernel/include/file.hrl").
 -export([http/4]).
-
+-define(LICENSE_TABLE, license_storage).
 
 
 http(Host, 'GET', ["erlyvideo", "api", "filelist"], Req) ->
@@ -66,6 +66,7 @@ http(Host, 'GET', ["erlyvideo", "api", "stream" | Path], Req) ->
       Req:respond(500, [{'Content-Type', "application/json"}], [mochijson2:encode([{error, unknown}]), "\n"])
   end;
 
+
 http(_Host, 'GET', ["erlyvideo","api","licenses"], Req) -> 
   case ems_license_client:list() of
     {ok, List} -> 
@@ -84,10 +85,29 @@ http(_Host, 'POST', ["erlyvideo","api","licenses"], Req) ->
   end,
   Req:ok([{'Content-Type', "application/json"}], [mochijson2:encode([{state,Reply}]),"\n"]);
 
+http(_Host, 'POST', ["erlyvideo","api","licenses","write"], Req) ->
+      Args = Req:get(body),
+      RawVersions = binary:split(Args,[<<"&">>],[global]),
+      Versions = lists:map(fun(One) ->
+        [Name,Version] = binary:split(One,[<<"=">>]),
+        case Version of 
+          <<>> -> 
+            {};
+          <<"Remove">> ->
+            {};
+          _Else ->         
+            {binary_to_atom(Name, latin1), binary_to_list(Version)} 
+        end
+      end, RawVersions),
+      io:format("Versions: ~p~n", [Versions]),
+      case ems_license_client:save(Versions) of
+        ok -> Req:respond(200, [{'Content-Type', "application/json"}], [<<"true\n">>]);
+        {error, Reason} -> Req:respond(500, [{'Content-Type', "application/json"}], [mochijson2:encode([{error, iolist_to_binary(io_lib:format("~p", [Reason]))}])])
+      end;
+
 
 http(_, _, _, _) ->
   unhandled.
-  
 
 clean_values(Info) ->
   clean_values(lists:ukeysort(1, lists:reverse(Info)), []).

@@ -30,7 +30,7 @@
 -define(TIMEOUT, 20*60000).
 -define(LICENSE_TABLE, license_storage).
 %% External API
--export([list/0, load/0, afterload/1, read_config/2]).
+-export([list/0, load/0, save/1, afterload/1, read_config/2,read_config/0]).
 
 %% gen_server callbacks
 
@@ -45,10 +45,46 @@ list() ->
     Config ->
       case construct_url(Config,list) of 
         undefined -> [];
-        URL ->  
-          load_by_url(URL)
+        URL -> 
+          case load_by_url(URL) of
+            {ok, Commands} -> {ok, append_current_version(Commands)};
+            Else -> Else
+          end
       end
   end.
+
+
+append_current_version(Commands) ->
+  lists:map(fun({project, Project}) ->
+    Name = proplists:get_value(name, Project),
+    case application:get_key(Name, vsn) of
+      {ok, Version} ->
+        case is_binary(Version) of
+ 	  true ->
+            {project, [{current_version, list_to_binary(Version)}|Project]};
+          false -> 
+            {project, [{current_version, Version}|Project]}
+         end;
+      undefined ->
+        {project, Project}
+    end  
+  end, Commands). 
+
+save(Versions) ->
+  case read_config() of
+    undefined -> {error, no_config};
+    Config ->
+      Config1 = lists:keystore(projects, 1, Config, {projects, Versions}),
+      case load_from_server(Config1) of
+        {ok, ServerReply} ->
+          load_code(ServerReply),
+          save_to_storage(Config1, ServerReply),
+          ok;
+        {error, Error} ->
+          {error, Error}
+      end
+  end.
+  
   
 %%-------------------------------------------------------------------------
 %% @spec () -> ok | {error, Reason}
@@ -124,8 +160,10 @@ load_from_storage(undefined) ->
   {error, config_wrong};
 
 load_from_storage(Config) ->
-  StrictVersions = proplists:get_value(projects, Config, []),
+  StrictVersions = versions_of_projects(Config),
   StoredContent = read_storage(Config),
+  % ?D(StoredContent),
+  % io:format("Hi!!!: ~p ~p~n", [StoredContent, StrictVersions]),
   case storage_has_versions(StoredContent, StrictVersions) of
     ok ->
       StartupModules = load_code(StoredContent),
@@ -174,8 +212,8 @@ open_license_storage(Config) ->
     undefined -> {error, no_cache_dir};
     StorageDir ->
       case dets:open_file(?LICENSE_TABLE, [{file,ems:pathjoin(StorageDir,"license_storage.db")}]) of
-        {ok, ?LICENSE_TABLE} -> {ok, ?LICENSE_TABLE};
-        {error, Reason} -> {error, Reason} 
+        {ok, ?LICENSE_TABLE} -> ?D(?LICENSE_TABLE), {ok, ?LICENSE_TABLE};
+        {error, Reason} -> ?D(Reason), {error, Reason} 
       end
   end.
 
@@ -214,8 +252,8 @@ load_by_url(URL) ->
   case ibrowse:send_req(URL,[],get,[],[{response_format,binary}]) of
     {ok, "200", _Headers, Bin} ->
       unpack_server_response(Bin);
-    {ok, "404", _Headers, _Bin} ->
-      error_logger:error_msg("No selected versions on server~n"),
+    {ok, "404", _Headers, Bin} ->
+      error_logger:error_msg("No selected versions on server: ~p~n", [erlang:binary_to_term(Bin)]),
       {error, notfound};
     {error, Reason} ->
       {error, Reason};
@@ -245,13 +283,31 @@ construct_url(Config, Command) when is_list(Config) ->
     undefined -> undefined;
     License ->
       LicenseURL = proplists:get_value(url, Config, "http://license.erlyvideo.tv/license"),
-      Versions = [io_lib:format("&version[~s]=~s", [Name,Version]) || {Name,Version} <- proplists:get_value(projects, Config, [])],
+      RawVersions = versions_of_projects(Config),
+      Versions = [io_lib:format("&version[~s]=~s", [Name,Version]) || {Name,Version} <- RawVersions],
       lists:flatten([LicenseURL, io_lib:format("?key=~s&command=~s", [License, Command]), Versions])
   end.
   
 
+get_versions_from_storage() ->
+  case dets:lookup(?LICENSE_TABLE,projects) of
+    [{projects, Projects}] -> Projects;
+    _ -> []
+  end.    
 
-
+versions_of_projects(Config) ->
+  LicensePath = proplists:get_value(license_dir,Config,"./"),
+  case proplists:get_value(projects,Config,undefined) of
+    undefined -> 
+      case dets:open_file(?LICENSE_TABLE,[{file,ems:pathjoin(LicensePath,"license_storage.db")}]) of
+        {ok,?LICENSE_TABLE} -> 
+          get_versions_from_storage();
+        _ -> []
+      end;
+    Projects -> Projects
+  end.
+         
+              
 
 
 

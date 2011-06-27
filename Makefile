@@ -56,8 +56,8 @@ clean-doc:
 	rm -fv doc/*.css
 
 
-run: priv/erlyvideo.conf priv/log4erl.conf compile
-	ERL_LIBS=apps:..:deps erl -boot start_sasl -s erlyvideo -config files/app.config
+run: priv/erlyvideo.conf priv/log4erl.conf 
+	ERL_LIBS=apps:..:deps:../commercial/apps erl +A 4 +a 2048 +K true -sname ev -boot start_sasl -s erlyvideo -config files/app.config
 
 priv/log4erl.conf: priv/log4erl.conf.sample
 	[ -f priv/log4erl.conf ] || cp priv/log4erl.conf.sample priv/log4erl.conf
@@ -81,8 +81,12 @@ packages: release
 	cp contrib/erlyvideo tmproot/etc/init.d/
 	cd tmproot && \
 	fpm -s dir -t deb -n erlyvideo -v $(VERSION) -m "Max Lapshin <max@maxidoors.ru>" etc/init.d/erlyvideo opt && \
-	fpm -s dir -t rpm -n erlyvideo -v $(VERSION) -m "Max Lapshin <max@maxidoors.ru>" etc/init.d/erlyvideo opt 
+	fpm -s dir -t rpm -n erlyvideo -v $(VERSION) -m "Max Lapshin <max@maxidoors.ru>" etc/init.d/erlyvideo opt
 	mv tmproot/*.deb tmproot/*.rpm .
+
+upload_packages: 
+	scp *$(VERSION)* erlyhub@git.erlyvideo.org:/apps/erlyvideo/debian/public/binary
+	ssh erlyhub@git.erlyvideo.org "cd /apps/erlyvideo/debian ; ./update ; cd public/binary ; ln -sf erlyvideo-$(VERSION).tgz erlyvideo-latest.tgz ; ln -sf erlyvideo-$(VERSION).x86_64.rpm erlyvideo-latest.x86_64.rpm"
 
 .PHONY: doc debian compile
 

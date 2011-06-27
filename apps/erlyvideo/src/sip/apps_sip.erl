@@ -27,12 +27,24 @@
 -include("../rtmp/rtmp_session.hrl").
 -include("../log.hrl").
 
--export([register/2, ring/2, 'WAIT_FOR_DATA'/2]).
+%% RTMP callbacks
+-export([
+         register/2,
+         unregister/2,
+         ring/2,
+         bye/2
+        ]).
 
--export([sip_call/3]).
+-export([
+         sip_call/3
+        ]).
+
+-export([
+         handle_info/2
+        ]).
 
 sip_call(RTMP, OutStream, InStream) when is_pid(RTMP) andalso is_binary(OutStream) andalso is_binary(InStream) ->
-  gen_fsm:send_event(RTMP, {sip_call, OutStream, InStream}).
+  RTMP ! {sip_call, OutStream, InStream}.
 
 register(State, #rtmp_funcall{args = [_, Number, Password] = Args} = AMF) ->
   ?D({sip_register, self(), Args}),
@@ -42,8 +54,13 @@ register(State, #rtmp_funcall{args = [_, Number, Password] = Args} = AMF) ->
   end,
   State.
 
+unregister(State, #rtmp_funcall{args = [_, Number]}) ->
+  ?DBG("Unregister ~p: ~p", [self(), Number]),
+  ems_sip_flashphone:unregister(Number, self()),
+  State.
+
 ring(State, #rtmp_funcall{args = [_, Number]} = AMF) ->
-  case ems_sip_flashphone:call(Number, []) of
+  case ems_sip_flashphone:call(Number, [], self()) of
     {ok, _Pid} ->
       rtmp_session:reply(State,AMF#rtmp_funcall{args = [null, true]});
     undefined ->
@@ -51,8 +68,12 @@ ring(State, #rtmp_funcall{args = [_, Number]} = AMF) ->
   end,
   State.
 
+bye(State, #rtmp_funcall{args = Args}) ->
+  ?DBG("BYE (~p): ~p", [self(), Args]),
+  ems_sip_flashphone:bye(self()),
+  State.
 
-'WAIT_FOR_DATA'({sip_call, OutStream, InStream}, #rtmp_session{socket = Socket} = State) ->
+handle_info({sip_call, OutStream, InStream}, #rtmp_session{socket = Socket} = State) ->
   % io:format("NetConnection.Message ~s~n", [Message]),
   rtmp_socket:status(Socket, 0, <<"NetConnection.SipCall">>, {object, [{in_stream, InStream},{out_stream,OutStream}]}),
-  {next_state, 'WAIT_FOR_DATA', State}.
+  {noreply, State}.

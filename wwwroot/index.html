@@ -145,7 +145,7 @@ function openFile(url) {
         listeners: {
           activate: function(panel) {
             if (currentPlayedFile) {
-              document.getElementById("hls_video").innerHTML = "<video src='/iphone/playlists/"+currentPlayedFile+".m3u8' controls autoplay></video>";
+              document.getElementById("hls_video").innerHTML = "<video src='/hls/"+currentPlayedFile+"/index.m3u8' controls autoplay></video>";
             }
           },
           deactivate: function(panel) {
@@ -266,6 +266,7 @@ Ext.onReady(function(){
   
   var playPanel = new Ext.Panel({
     title: "Play",
+    id: 'play-panel',
     collapsible: true,
     html: video_launcher_html
   });
@@ -396,17 +397,28 @@ Ext.onReady(function(){
       for(var i = 0; i < licenses.length; i++) {
         var data = [["", "Remove"]];
         for(var j = 0; j < licenses[i].versions.length; j++) {
-          var title;
-          if(licenses[i].versions[j]) {
-            title = licenses[i].versions[j];
-          } else {
-            "HEAD";
-          }
+          var title = licenses[i].versions[j];
           data[data.length] = [licenses[i].versions[j], title];
         }
+        
+         
         var cb = new Ext.form.ComboBox({
-          label: licenses[i].name,
-          data: data
+          typeAhead: true,
+          triggerAction: 'all',
+          lazyRender:true,
+          mode: 'local',
+          value: licenses[i].current_version,
+          store: new Ext.data.SimpleStore({
+            fields:[
+              'name',
+	            'version'],
+            data: data
+          }),
+          id: licenses[i].name+"-version-select",
+          name: licenses[i].name,
+          title: licenses[i].name,
+          valueField: 'version',
+          displayField: 'version'
         });
         items[items.length] = cb;
       }
@@ -414,13 +426,14 @@ Ext.onReady(function(){
       var licensePanel = new Ext.FormPanel({
         title : 'Product licenses',
         items: items,
+        id: 'license-panel',
         buttons: [{
           text: "Select versions",
           handler: function() {
             licensePanel.getForm().submit({
-              url: '/erlyvideo/api/licenses',
+              url: '/erlyvideo/api/licenses/write',
               waitMsg: "Saving license versions",
-              success: function(f,a) {
+              success: function(f,a) { 
                 Ext.Msg.alert("Success", "Restart erlyvideo to see effects");
               },
               failure: function(f,a) {
@@ -431,7 +444,7 @@ Ext.onReady(function(){
         }]
       });
       
-      viewport.items.get(1).items.add(licensePanel);
+      viewport.items.get(1).items.insert(1, licensePanel);
       viewport.items.get(1).doLayout();
       viewport.items.get(1).syncSize();
       viewport.doLayout();

@@ -25,6 +25,8 @@
 -include("../include/video_frame.hrl").
 -include("../include/media_info.hrl").
 -include("../include/flv.hrl").
+-include("../include/aac.hrl").
+-include("../include/mp3.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("log.hrl").
 
@@ -231,11 +233,17 @@ insert_keyframes(#flv_media{frames = FrameTable} = MediaInfo, [Offset|Offsets], 
 seek(#flv_media{} = Media, TS, _Options) when TS == 0 orelse TS == undefined ->
   {{audio_config, first(Media), 0}, 0};
 
-seek(#flv_media{frames = undefined} = Media, Timestamp, _Options) ->
+seek(#flv_media{frames = undefined} = Media, Timestamp, Options) ->
   erlang:error(flv_file_should_have_frame_table),
-  find_frame_in_file(Media, Timestamp, 0, first(Media), first(Media));
+  find_frame_in_file(Media, Timestamp, proplists:get_value(seek_mode, Options, keyframe));
 
-seek(#flv_media{frames = FrameTable}, Timestamp, _Options) ->
+seek(#flv_media{frames = FrameTable} = Media, Timestamp, Options) ->
+  case proplists:get_value(seek_mode, Options, keyframe) of
+    keyframe -> find_keyframe_in_table(FrameTable, Timestamp);
+    frame -> find_frame_in_file(Media, Timestamp, frame)
+  end.
+  
+find_keyframe_in_table(FrameTable, Timestamp) ->  
   TimestampInt = round(Timestamp),
   Ids = ets:select(FrameTable, ets:fun2ms(fun({FrameTimestamp, Offset} = _Frame) when FrameTimestamp =< TimestampInt ->
     {Offset, FrameTimestamp}
@@ -248,14 +256,27 @@ seek(#flv_media{frames = FrameTable}, Timestamp, _Options) ->
     _ -> undefined
   end.
 
-find_frame_in_file(Media, Timestamp, PrevTS, PrevOffset, Offset) ->
+find_frame_in_file(Media, Timestamp, SeekMode) ->
+  find_frame_in_file(Media, Timestamp, 0, first(Media), first(Media), SeekMode).
+
+
+find_frame_in_file(Media, Timestamp, PrevTS, PrevOffset, Offset, SeekMode) ->
   case read_frame(Media, Offset) of
-    #video_frame{flavor = keyframe, dts = DTS} when DTS > Timestamp -> 
+    
+    #video_frame{dts = DTS} when DTS >= Timestamp andalso SeekMode == frame -> 
+      {{audio_config, Offset, DTS}, DTS};
+    #video_frame{flavor = keyframe, dts = DTS} when DTS > Timestamp andalso SeekMode == keyframe -> 
       {{audio_config, PrevOffset, PrevTS}, PrevTS};
+      
+      
     #video_frame{flavor = keyframe, dts = DTS, next_id = Next} -> 
-      find_frame_in_file(Media, Timestamp, DTS, Offset, Next);
+      find_frame_in_file(Media, Timestamp, DTS, Offset, Next, SeekMode);
+
+    #video_frame{dts = DTS, next_id = Next} when SeekMode == frame -> 
+      find_frame_in_file(Media, Timestamp, DTS, Offset, Next, SeekMode);
+      
     #video_frame{next_id = Next} ->
-      find_frame_in_file(Media, Timestamp, PrevTS, PrevOffset, Next);
+      find_frame_in_file(Media, Timestamp, PrevTS, PrevOffset, Next, SeekMode);
     eof when PrevTS == undefined -> 
       undefined;
     eof ->  
@@ -297,7 +318,24 @@ read_frame(#flv_media{metadata_offset = Offset, reader = Reader} = Media, Offset
     Else -> Else
   end;
 
-read_frame(#flv_media{reader = Reader}, Offset) ->
-  flv:read_frame(Reader, Offset).
+read_frame(#flv_media{reader = Reader} = Media, Offset) ->
+  normalize_audio_dts(Media, flv:read_frame(Reader, Offset)).
 
+normalize_audio_dts(_Media, #video_frame{codec = mp3, body = Body, dts = DTS} = Frame) ->
+  {ok, #mp3_frame{samples = Samples, sample_rate = SampleRate}, _} = mp3:read(Body),
+  Count = (DTS*SampleRate)/(Samples*1000),
+  PureDTS = round(Count)*Samples*1000 / SampleRate,
+  % ?D({mp3,Count,DTS, PureDTS}),
+  Frame#video_frame{dts = PureDTS, pts = PureDTS};
+
+normalize_audio_dts(#flv_media{audio_config = #video_frame{body = Config}}, #video_frame{codec = aac, dts = DTS} = Frame) ->
+  #aac_config{sample_rate = SampleRate, samples_per_frame = Samples} = aac:decode_config(Config),
+  Count = (DTS*SampleRate)/(Samples*1000),
+  PureDTS = round(Count)*Samples*1000 / SampleRate,
+  % ?D({aac,Count,DTS, PureDTS}),
+  Frame#video_frame{dts = PureDTS, pts = PureDTS};
+
+normalize_audio_dts(_Media, Frame) ->
+  % ?D({Frame#video_frame.codec, Frame#video_frame.dts}),
+  Frame.
 

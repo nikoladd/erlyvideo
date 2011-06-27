@@ -1,8 +1,7 @@
-%%---------------------------------------------------------------------------------------
 %%% @author     Max Lapshin <max@maxidoors.ru> [http://erlyvideo.org]
 %%% @copyright  2010 Max Lapshin
-%%% @doc        RTMP functions, that support pushing messages to client
-%%% @reference  See <a href="http://erlyvideo.org/" target="_top">http://erlyvideo.org</a> for more information
+%%% @doc        trusted login
+%%% @reference  See <a href="http://erlyvideo.org/" target="_top">http://erlyvideo.org/</a> for more information
 %%% @end
 %%%
 %%% This file is part of erlyvideo.
@@ -21,25 +20,30 @@
 %%% along with erlyvideo.  If not, see <http://www.gnu.org/licenses/>.
 %%%
 %%%---------------------------------------------------------------------------------------
--module(apps_push).
+-module(regex_play_limit, [Regex, Count]).
 -author('Max Lapshin <max@maxidoors.ru>').
--include("../log.hrl").
 -include_lib("rtmp/include/rtmp.hrl").
 -include("../rtmp/rtmp_session.hrl").
+-include("../log.hrl").
 
--export(['WAIT_FOR_DATA'/2]).
+-export([play/2]).
 
--export([send_message/2]).
 
-'WAIT_FOR_DATA'({message, Message}, #rtmp_session{socket = Socket} = State) ->
-  % io:format("NetConnection.Message ~s~n", [Message]),
-  rtmp_socket:status(Socket, 0, <<"NetConnection.Message">>, Message),
-  {next_state, 'WAIT_FOR_DATA', State};
 
-'WAIT_FOR_DATA'(_Message, _State) -> unhandled.
+play(#rtmp_session{host = Host} = State, #rtmp_funcall{args = [null, FullName | Args]} = _AMF) ->
+  {Name, _Options} = apps_streaming:parse_play(FullName, Args),
+  case re:run(Name, Regex) of
+    nomatch -> unhandled;
+    {match, _} ->
+      ClientsCount = lists:sum(lists:map(fun({Entry, _Pid, Info}) ->
+        case re:run(Entry, Regex) of
+          nomatch -> 0;
+          {match, _} -> proplists:get_value(client_count, Info)
+        end
+      end, media_provider:entries(Host))),
+      if 
+        ClientsCount < Count -> unhandled;
+        true -> ?D({too_many_connections, Regex, ClientsCount, "limit is", Count}), State
+      end  
+  end.
 
-send_message(#rtmp_session{host = Host} = Session, #rtmp_funcall{args = [null, ChannelF, Message]}) -> 
-  ChannelId = round(ChannelF),
-  ems_users:send_to_channel(Host, ChannelId, Message),
-  ems_log:access(Host, "MESSAGE ~p ~p ~p ~p~n", [Host, Session#rtmp_session.addr, ChannelId, Message]),
-  Session.

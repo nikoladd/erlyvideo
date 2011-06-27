@@ -135,7 +135,7 @@ quicktime_broadcaster_test() ->
       codec = h264,
       config = <<1,77,0,12,255,225,0,20,39,77,64,12,169,24,80,143,203,128,53,6,1,6,182,194,
         181,239,124,4,1,0,5,40,222,9,23,160>>, 
-      params = #video_params{width = 160, height = 128},
+      params = #video_params{width = 160, height = 120},
       timescale = 90.0,
       options = [{control,"trackid=2"},{payload_num, 97}]
     }],
@@ -574,6 +574,27 @@ a=control:trackID=2\r
 a=rtpmap:97 mpeg4-generic/44100/2\r
 a=fmtp:97 profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1210\r
 ">>.
+
+
+
+treart_sdp() ->
+<<"v=0
+o=- 1 2  IN IP4 192.168.0.175
+c=IN IP4 0.0.0.0/127
+s=RTSP Session
+i=Triart 1.0 Streaming Server
+u=www.url.ru
+e=admin@url.ru
+t=0 0
+a=range:npt=0.000000-
+a=control:rtsp://192.168.0.175:5555/
+m=video 0 RTP/AVP 33
+a=rtpmap:33 MP2T/90000
+a=fmtp:33 profile-level-id=1 config=
+c=IN IP4 0.0.0.0/127
+a=control:trackID=0
+">>.
+
 
 
 encoder_test() ->

@@ -91,7 +91,7 @@ extract_nal(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
   
   end = find_nal(data, start, END);
   if (end == -1) {
-    end = data.size;
+    return enif_make_atom(env, "undefined");
   }
   
   if (start < 0 || start > data.size - 1 || end < 0 || end < start || end > data.size) {
@@ -112,7 +112,7 @@ extract_nal(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 
 static ErlNifFunc mpegts_reader_funcs[] =
 {
-    {"extract_nal", 1, extract_nal}
+    {"extract_nal1", 1, extract_nal}
 };
 
 ERL_NIF_INIT(mpegts_reader, mpegts_reader_funcs, NULL, reload, upgrade, unload)

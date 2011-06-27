@@ -47,12 +47,14 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
-init(Direction, #media_info{audio = Audio, video = Video} = _MediaInfo) when Direction == in orelse Direction == out ->
+init(Location, #media_info{audio = Audio, video = Video} = _MediaInfo)
+  when Location == local orelse
+       Location == remote ->
   Streams = lists:sort(fun(#stream_info{stream_id = Id1}, #stream_info{stream_id = Id2}) ->
     Id1 =< Id2
   end, Audio ++ Video),
   ContentMap = [{Content,Id} || #stream_info{content = Content, stream_id = Id} <- Streams],
-  #rtp_state{streams = Streams, direction = Direction, content_map = ContentMap}.
+  #rtp_state{streams = Streams, location = Location, content_map = ContentMap}.
 
 %%--------------------------------------------------------------------
 %% @spec (RtpState::rtp_state(), StreamId::integer(), Headers::proplist) -> rtp_state()
@@ -73,7 +75,7 @@ sync(#rtp_state{channels = Channels} = State, Id, Headers) ->
 %% @end
 %%--------------------------------------------------------------------
 rtp_info(#rtp_state{channels = Channels} = _State) ->
-  string:join([rtp_encoder:rtp_info(Chan) || Chan <- tuple_to_list(Channels)], ",").
+  string:join([rtp_encoder:rtp_info(Chan) || Chan <- tuple_to_list(Channels), Chan =/= undefined], ",").
 
 
 %%--------------------------------------------------------------------
@@ -95,21 +97,24 @@ rtp_info(#rtp_state{channels = Channels} = _State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
-setup_channel(#rtp_state{streams = Streams, direction = Direction, channels = Channels, udp = UDPMap, tcp_socket = OldSocket} = State, StreamId, Transport) ->
+setup_channel(#rtp_state{streams = Streams, location = Location, channels = Channels, udp = UDPMap, tcp_socket = OldSocket} = State, StreamId, Transport) ->
   Stream = #stream_info{content = Content} = lists:nth(StreamId, Streams),
-  Channel = case Direction of
-    in -> rtp_decoder:init(Stream);
-    out -> rtp_encoder:init(Stream)
+  Channel = case Location of
+    local -> rtp_decoder:init(Stream);
+    remote -> rtp_encoder:init(Stream)
   end,
   State1 = State#rtp_state{channels = setelement(StreamId, Channels, Channel)},
   case proplists:get_value(proto, Transport, udp) of
     tcp ->
       {ok, State1#rtp_state{transport = tcp, tcp_socket = proplists:get_value(tcp_socket, Transport, OldSocket)}, []};
-    udp -> 
-      UDP = #rtp_udp{local_rtp_port = SPort1, local_rtcp_port = SPort2, local_addr = Source} = case element(StreamId, UDPMap) of
-        undefined -> rtp:open_ports(Content);
-        Else -> Else
-      end,
+    udp ->
+      UDP = #rtp_udp{local_rtp_port = SPort1, local_rtcp_port = SPort2, local_addr = Source} =
+        case element(StreamId, UDPMap) of
+          undefined ->
+            ?DBG("OPEN PORTS: StreamId: ~p, UDPMap: ~p", [StreamId, UDPMap]),
+            rtp:open_ports(Content);
+          Else -> Else
+        end,
       UDP1 = UDP#rtp_udp{
         remote_rtp_port = proplists:get_value(remote_rtp_port, Transport),
         remote_rtcp_port = proplists:get_value(remote_rtcp_port, Transport),
@@ -124,7 +129,7 @@ setup_channel(#rtp_state{streams = Streams, direction = Direction, channels = Ch
 %% @doc Encode and send video_frame
 %% @end
 %%--------------------------------------------------------------------
-handle_frame(#rtp_state{transport = Transport, content_map = ContentMap, channels = Channels, direction = out} = State, #video_frame{content = Content} = Frame) ->
+handle_frame(#rtp_state{transport = Transport, content_map = ContentMap, channels = Channels, location = remote} = State, #video_frame{content = Content} = Frame) ->
   Num = proplists:get_value(Content, ContentMap),
   Channel = element(Num, Channels),
   {ok, Channel1, Packets} = rtp_encoder:encode(Frame, Channel),
@@ -173,7 +178,11 @@ handle_data(#rtp_state{channels = Channels} = State, Num, Packet) when Num rem 2
   Id = Num div 2 + 1,
   {ok, Channel1, NewFrames} = rtp_decoder:decode(Packet, element(Id, Channels)),
   % ?D({rtp,Num, size(Packet), length(NewFrames)}),
-  reorder_frames(State#rtp_state{channels = setelement(Id, Channels, Channel1)}, NewFrames).
+  reorder_frames(State#rtp_state{channels = setelement(Id, Channels, Channel1)}, NewFrames);
+
+handle_data(State, _Num, _Packet) ->
+  ?DBG("SKIP (~p):~n~p~n~p", [_Num, State, _Packet]),
+  {ok, State, []}.
 
 send_rtcp_data(#rtp_state{transport = Transport} = State, Id, Packet) ->
   Num = Id,
@@ -242,8 +251,12 @@ add_configs(#rtp_state{sent_audio_config = false} = Socket, [#video_frame{codec 
   add_configs(Socket#rtp_state{sent_audio_config = true}, Frames, [Frame,Config|Acc]);
 
 add_configs(Socket, [#video_frame{codec = h264, flavor = keyframe, dts = DTS} = Frame|Frames], Acc) ->
-  Config = (video_frame:config_frame(stream(Socket, video)))#video_frame{dts = DTS, pts = DTS},
-  add_configs(Socket, Frames, [Frame,Config|Acc]);
+  case video_frame:config_frame(stream(Socket, video)) of
+    #video_frame{} = Config ->
+      add_configs(Socket, Frames, [Frame,Config#video_frame{dts = DTS, pts = DTS}|Acc]);
+    undefined ->
+      add_configs(Socket, Frames, [Frame|Acc])
+  end;
 
 add_configs(Socket, [], Acc) ->
   {Socket, lists:reverse(Acc)};
@@ -369,7 +382,7 @@ open_ports(Type) ->
 
 
 try_ports(audio) ->
-  try_rtp(8000);
+  try_rtp(5050);
 
 try_ports(video) ->
   try_rtp(5000).

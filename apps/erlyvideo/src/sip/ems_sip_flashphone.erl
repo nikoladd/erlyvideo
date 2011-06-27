@@ -31,7 +31,9 @@
 
 -behaviour(gen_fsm).
 
--export([start_link/1]).
+-export([
+         start_link/1
+        ]).
 
 -export([
          init/1,
@@ -46,8 +48,9 @@
 
 
 -export([
-         init/0,
+         cb_init/1,
          dialog/3,
+         create_dialog/3,
          ok/3,
          dialog_timeout/1,
          response/1,
@@ -58,7 +61,11 @@
          progress/3,
          ack/2,
          register/3,
-         call/2
+         unregister/1,
+         unregister/2,
+         reregister/2,
+         call/3,
+         bye/1
         ]).
 
 
@@ -70,6 +77,7 @@
           stream_in            :: binary(),
           stream_out           :: binary(),
           sdp                  :: [binary()],
+          tu                   :: pid(),
           client               :: pid(),
           client_ref           :: reference(),
           dialog_timeout       :: integer(),
@@ -78,8 +86,11 @@
          }).
 
 -record(state, {
+          tu                   :: pid(),
+          name                 :: list(),
           media                :: pid(),
           rtp                  :: pid(),
+          rtp_ref              :: reference(),
           stream_in            :: binary(),
           stream_out           :: binary()
          }).
@@ -91,7 +102,13 @@ start_link(Args) ->
 init(Args) ->
   ?DBG("Args: ~p", [Args]),
   ?DBG("Start dialog process for flash", []),
-  {ok, d_active, #state{}}.
+  TU = proplists:get_value(tu, Args),
+  Name = binary_to_list(proplists:get_value(name, Args)),
+  esip_registrator:set_dialog(Name, self()),
+  {ok, d_active, #state{
+         tu = TU,
+         name = Name
+        }}.
 
 d_active(_Event, State) ->
   ?DBG("Unhandled event: ~p", [_Event]),
@@ -117,6 +134,13 @@ d_active({opposite, {ringing, _Response}}, _From,
   ?DBG("Ringing from opposite", []),
   {reply, ok, d_active, State};
 
+d_active({data, _LT, {ack, _URI, _UserMod}}, _From,
+         #state{rtp = RTP, stream_out = StreamOut} = State) ->
+  ?DBG("ACK DIALOG: ~p:~n", [self()]),
+  %%send_opposite(OppDPid, {ack}),
+  ack(RTP, StreamOut),
+  {reply, ok, d_active, State#state{}};
+
 d_active(Event, _From, State) ->
   ?DBG("Unhandled sync event: ~p", [Event]),
   Error = {unknown_call, Event},
@@ -134,11 +158,19 @@ handle_sync_event(Event, _From, _StateName, State) ->
 
 handle_info({config, Media, StreamIn, StreamOut, RTP}, StateName, State) ->
   ?DBG("Set media: ~p, ~p, ~p, ~p", [Media, StreamIn, StreamOut, RTP]),
+  RTPRef = erlang:monitor(process, RTP),
   {next_state, StateName,
    State#state{media = Media,
                stream_in = StreamIn,
                stream_out = StreamOut,
-               rtp = RTP}};
+               rtp = RTP,
+               rtp_ref = RTPRef
+              }};
+
+handle_info({set_tu, TUPid}, StateName,
+            #state{} = State) ->
+  ?DBG("Set TU: ~p", [TUPid]),
+  {next_state, StateName, State#state{tu = TUPid}};
 
 handle_info({ok, Opts, _Response}, StateName,
             #state{} = State) ->
@@ -152,16 +184,43 @@ handle_info({ringing, _Response}, StateName,
   {next_state, StateName, State};
 
 handle_info({bye}, _StateName,
-         #state{} = State) ->
-  ?DBG("Bye: ~p", [self()]),
+         #state{tu = TUPid} = State) ->
+  ?DBG("Bye: ~p (TU: ~p)", [self(), TUPid]),
   %% STOP HERE
+  gen_fsm:send_event(TUPid, {opposite, {bye}}),
   {stop, normal, State};
 
+handle_info({declined, _Response}, _StateName,
+            #state{rtp = RTP} = State) ->
+  ?DBG("Declined", []),
+  rtp_server:stop(RTP),
+  {stop, normal, State};
+
+handle_info({send_create}, StateName,
+            #state{tu = TU} = State) ->
+  esip_transaction_user:async_event(TU, {dialog_created, self()}),
+  {next_state, StateName, State};
+
+
+handle_info({'DOWN', RTPRef, process, RTP, _Reason}, StateName,
+            #state{rtp = RTP,
+                   rtp_ref = RTPRef} = State) ->
+  ?DBG("RTP Down: ~p", [RTP]),
+  {next_state, StateName,
+   State#state{rtp = undefined,
+               rtp_ref = undefined}};
 handle_info(_Info, StateName, State) ->
   ?DBG("Unhandled info: ~p", [_Info]),
   {next_state, StateName, State}.
 
-terminate(_Reason, _StateName, _State) ->
+terminate(_Reason, _StateName,
+          #state{rtp = RTP,
+                 name = Name} = _State) ->
+  if is_pid(RTP) ->
+      rtp_server:stop(RTP);
+     true -> pass
+  end,
+  esip_registrator:set_dialog(Name, undefined),
   ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
@@ -169,17 +228,15 @@ code_change(_OldVsn, StateName, State, _Extra) ->
 
 
 
-
-
-init() ->
+cb_init(Args) ->
   esip_dialog_sup:start_mod_sup(?MODULE),
-  Args = [{}],
   {ok, Pid} = esip_dialog_sup:start_worker(?MODULE, Args),
+  TU = proplists:get_value(tu, Args),
   {ok, #sip_cb_state{
      pid = Pid,
+     tu = TU,
      dialog_timeout = timer:seconds(10)
     }}.
-
 
 
 %%--------------------------------------------------------------------
@@ -188,9 +245,22 @@ init() ->
 %%
 %% @end
 %%--------------------------------------------------------------------
-register(Number, Password, Client) when is_list(Number) andalso is_pid(Client) ->
-  esip_registrator:register(Number, Password, Client),
+register(Number, Password, Client) when is_pid(Client) ->
+  esip_registrator:register(Number, Password, Client, ?MODULE),
+  send_reg(Number, Password).
 
+unregister(Client) when is_pid(Client) ->
+  {ok, OrigNameS, Password, _} = esip_registrator:find(Client),
+  ?MODULE:unregister(OrigNameS, Password).
+
+unregister(NameS, Password) ->
+  Name = list_to_binary(NameS),
+  send_reg(Name, Password, 0).
+
+send_reg(Number, Password) ->
+  send_reg(Number, Password, 3600).
+
+send_reg(Number, Password, Expires) ->
   FlashPhoneConfig = ems:get_var(flashphone, undefined),
   case proplists:get_value(sip, FlashPhoneConfig) of
     undefined -> ok;
@@ -209,11 +279,10 @@ register(Number, Password, Client) when is_list(Number) andalso is_pid(Client) -
       NatRouter = proplists:get_value(nat_router, SipCfg),
 
       Domain = esip:'#new-sip_uri'([{domain, DomainName}, {port, RegPort}]),
-      FromURI = ToURI = esip:'#new-sip_uri'([{name, list_to_binary(Number)}, {domain, DomainName}]),
+      FromURI = ToURI = esip:uri(Number, DomainName),
       FromName = ToName = "Flash client " ++ Number,
       RegUserOpts =
         [
-         {parent, self()},
          {address, esip_parser_util:p_host(RegAddress)},
          {port, RegPort},
          {register_domain, Domain},
@@ -224,15 +293,14 @@ register(Number, Password, Client) when is_list(Number) andalso is_pid(Client) -
          {from_name, FromName},
          {to, ToURI},
          {to_name, ToName},
-         {contact_name, Number}
+         {contact_name, Number},
+         {expires, Expires}
         ],
       {ok, _TUPid} = esip_transaction_sup:start_user({registration, RegUserOpts})
-  end;
+  end.
 
-register(Number, Password, Client)
-  when not (is_list(Number) andalso is_list(Password)) ->
-  ?MODULE:register(a2l(Number), a2l(Password), Client).
-
+reregister(Number, Password) ->
+  send_reg(Number, Password).
 
 
 %%--------------------------------------------------------------------
@@ -241,18 +309,21 @@ register(Number, Password, Client)
 %%
 %% @end
 %%--------------------------------------------------------------------
-call(Name, Options) when is_list(Name) ->
-  call(list_to_binary(Name), Options);
-call(Name, _Options) when is_binary(Name) ->
-  {ok, CbState} = ?MODULE:init(),
-  originating(Name, CbState).
-
-originating(Name, #sip_cb_state{pid = DPid} = CbState) ->
-  ?DBG("Name: ~p, DPid: ~p", [Name, DPid]),
-  {ok, OrigNameS, Password} = esip_registrator:find(self()),
+call(Name, Options, Client) when is_list(Name) ->
+  call(list_to_binary(Name), Options, Client);
+call(Name, _Options, Client) when is_binary(Name) ->
+  {ok, OrigNameS, Password, _} = esip_registrator:find(Client),
   OrigName = list_to_binary(OrigNameS),
-  ?DBG("OrigName: ~p", [OrigName]),
+  {ok, CbState} = ?MODULE:cb_init([{name, OrigName}]),
+  case originating(OrigName, Password, Name, CbState) of
+    {ok, TUPid} ->
+      CbState#sip_cb_state.pid ! {set_tu, TUPid},
+      {ok, TUPid};
+    Other -> Other
+  end.
 
+originating(OrigName, Password, Name, #sip_cb_state{pid = DPid} = CbState) ->
+  ?DBG("Name: ~p, DPid: ~p", [Name, DPid]),
   StreamIn = <<OrigName/binary, <<"#-in">>/binary >>,
   StreamOut = << OrigName/binary, <<"#-out">>/binary >>,
   {ok, Media} = media_provider:create(default, StreamIn,
@@ -277,7 +348,7 @@ originating(Name, #sip_cb_state{pid = DPid} = CbState) ->
 
   MediaInfo =
     #media_info{flow_type = stream,
-                audio = [#stream_info{content = audio, stream_id = 1, codec = speex,
+                audio = [#stream_info{content = audio, stream_id = 1, codec = pcma,
                                       params = {audio_params,1,8000}}],
                 options = [{sdp_session, Sess}]},
 
@@ -287,9 +358,14 @@ originating(Name, #sip_cb_state{pid = DPid} = CbState) ->
   %%                               {media_info_out, MediaInfo},
   %%                               {consumer, Media}]),
 
+  COpt = [{rate, 8000},{channels, 1}],
+  TranscodeOpts = [{transcode_in, {{pcma, COpt}, {speex, COpt}}},
+                   {transcode_out, {{speex, COpt}, {pcma, COpt}}}],
+
   {ok, RTP} = rtp:start_server([{media_info_loc, MediaInfo},
-                                {consumer, Media}]),
-  {ok, {PortRTP, PortRTCP}} = rtp_server:listen_ports(RTP, 1, [{transport, udp}]),
+                                {consumer, Media}] ++ TranscodeOpts),
+  ?DBG("Started RTP server: ~p", [RTP]),
+  {ok, {PortRTP, PortRTCP}} = rtp_server:listen_ports(RTP, audio, [{transport, udp}]),
 
   ?DBG("RTP: ~p, ~p, ~p", [RTP, PortRTP, PortRTCP]),
   DPid ! {config, Media, StreamIn, StreamOut, RTP},
@@ -331,7 +407,6 @@ originating(Name, #sip_cb_state{pid = DPid} = CbState) ->
 
       SipOpts =
         [
-         {parent, self()},
          {address, esip_parser_util:p_host(RegAddress)},
          {port, RegPort},
          {request_uri, ToURI},
@@ -410,13 +485,15 @@ dialog(Request,
 
   Name = esip:'#get-sip_uri'(name, URI),
   case esip_registrator:find(Name) of
-    {ok, RTMP, _Pass} ->
+    {ok, RTMP, _Pass, _DPid} ->
 
-      MediaInfoRequest = #media_info{audio = Audio} = sdp:decode(Body),
+      MediaInfoRequest = #media_info{audio = Audio, video = _Video} = sdp:decode(Body),
       ?DBG("MediaIn:~n~p", [MediaInfoRequest]),
       AudioResult = [StreamInfo#stream_info{stream_id = 1} ||
                       #stream_info{codec = speex, params = #audio_params{sample_rate = 8000}} = StreamInfo <- Audio],
-
+      %% VideoResult = [StreamInfo#stream_info{stream_id = 1} ||
+      %%                 #stream_info{codec = h263} = StreamInfo <- Video],
+      VideoResult = [],
 
       RtpGlue =
         fun(MediaInfoReply, TranscodeOpts) ->
@@ -431,8 +508,9 @@ dialog(Request,
                        {media_info_rmt,MediaInfoReply},
                        {consumer, Media}] ++ TranscodeOpts,
             {ok, RTP} = rtp:start_server(RtpOpts),
+            {ok, {_PortRTP, _PortRTCP}} = rtp_server:listen_ports(RTP, audio, [{transport, udp}]),
+            rtp_server:add_stream(RTP, local, MediaInfoReply),
             rtp_server:add_stream(RTP, remote, MediaInfoReply),
-            {ok, {_PortRTP, _PortRTCP}} = rtp_server:listen_ports(RTP, 1, [{transport, udp}]),
 
             apps_sip:sip_call(RTMP, StreamOut, StreamIn),
 
@@ -455,16 +533,16 @@ dialog(Request,
                 response = esip:'#set-response'([{body,SDP}], Response)
                },
 
-            {ok, DPid} = esip_dialog:start_worker(uas, self(), Request),
-
-            DD = esip_dialog:create_ror(uas, Request, Origin),
-            DialogConfig =
-              [
-               {user_mod, ?MODULE},
-               {cb_state, NewCbState}
-              ],
-            ok = esip_dialog:call_worker(DD, {config, DialogConfig}),
-            DPid ! {set_opposite, CbPid},
+            CbPid ! {send_create},
+            %% {ok, DPid} = esip_dialog:start_worker(uas, self(), Request),
+            %% DD = esip_dialog:create_ror(uas, Request, Origin),
+            %% DialogConfig =
+            %%   [
+            %%    {user_mod, ?MODULE},
+            %%    {cb_state, NewCbState}
+            %%   ],
+            %% ok = esip_dialog:call_worker(DD, {config, DialogConfig}),
+            %% DPid ! {set_opposite, CbPid},
 
             {ok, Response, NewCbState}
         end,
@@ -482,7 +560,7 @@ dialog(Request,
           MediaInfoReply =
             MediaInfoRequest#media_info{
               audio = RecAudioResult,
-              video = []
+              video = VideoResult
              },
           ?DBG("MediaInfoReply:~n~p", [MediaInfoReply]),
 
@@ -494,7 +572,7 @@ dialog(Request,
           MediaInfoReply =
             MediaInfoRequest#media_info{
               audio = AudioResult,
-              video = []
+              video = VideoResult
              },
           RtpGlue(MediaInfoReply, [])
       end;
@@ -502,6 +580,10 @@ dialog(Request,
       {error, not_found}
   end.
 
+
+create_dialog(_Response, _Origin, #sip_cb_state{pid = DPid}) ->
+  ?DBG("Create dialog for terminating call: ~p", [DPid]),
+  DPid ! {send_create}.
 
 ok(Response, _Origin,
    #sip_cb_state{
@@ -514,22 +596,33 @@ ok(Response, _Origin,
 
   MediaInfo = #media_info{audio = Audio} = sdp:decode(esip:'#get-response'(body, Response)),
   ?DBG("MediaOut:~n~p", [MediaInfo]),
+
+  %% AudioResult = [StreamInfo#stream_info{stream_id = 1} ||
+  %%                 #stream_info{codec = speex, params = #audio_params{sample_rate = 8000}} = StreamInfo <- Audio],
   AudioResult = [StreamInfo#stream_info{stream_id = 1} ||
-                  #stream_info{codec = speex, params = #audio_params{sample_rate = 8000}} = StreamInfo <- Audio],
+                  #stream_info{codec = pcma, params = #audio_params{sample_rate = 8000}} = StreamInfo <- Audio],
+
   ?DBG("AudioResult:~n~p", [AudioResult]),
 
+  rtp_server:add_stream(RTP, local, MediaInfo),
   rtp_server:add_stream(RTP, remote, MediaInfo),
 
-  apps_sip:sip_call(RTMP, StreamOut, StreamIn),
-
+  timer:sleep(500),
   Fun = fun() -> media_provider:play(default, StreamOut, [{type,live}, {stream_id,1}]) end,
   rtp_server:play(RTP, Fun),
+
+  timer:sleep(500),
+  apps_sip:sip_call(RTMP, StreamOut, StreamIn),
 
   {ok, CbState}.
 
 ack(RTP, StreamOut) ->
   Fun = fun() -> media_provider:play(default, StreamOut, [{type,live}, {stream_id,1}]) end,
   rtp_server:play(RTP, Fun).
+
+bye(Client) when is_pid(Client) ->
+  {ok, _OrigNameS, _Password, DPid} = esip_registrator:find(self()),
+  DPid ! {bye}.
 
 dialog_timeout(#sip_cb_state{dialog_timeout = DTO}) ->
   DTO.
@@ -539,11 +632,3 @@ response(#sip_cb_state{response = Response}) ->
 
 origin(#sip_cb_state{origin = Origin}) ->
   Origin.
-
-%% TODO: move to some utils module
-
-a2l(A) when is_atom(A) -> atom_to_list(A);
-a2l(A) when is_integer(A) -> integer_to_list(A);
-a2l(A) when is_list(A) -> A;
-a2l(A) when is_binary(A) -> binary_to_list(A);
-a2l(A) -> A.

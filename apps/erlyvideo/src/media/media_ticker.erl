@@ -121,6 +121,7 @@ initialize_ticker(#ticker{options = Options, media = Media} = Ticker, {Pos, DTS}
       end;
     Duration -> Start + Duration
   end,
+  % ?D({playing, DTS, PlayingTill}),
   case PlayingTill of
     Start -> ?D({warning, "File duration is set to 0. Perhaps raise iphone segment size in streaming"});
     _ -> ok
@@ -247,7 +248,7 @@ load_frames(Media, Consumer, Pos, PlayingTill, Count, Frames) when Count > 0 ->
     eof ->
       {eof, Frames};
     
-    #video_frame{dts = NewDTS} when NewDTS > PlayingTill ->
+    #video_frame{dts = NewDTS} when NewDTS >= PlayingTill ->
       {eof, Frames};
       
     #video_frame{next_id = NewPos} = Frame ->

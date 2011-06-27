@@ -27,12 +27,14 @@
 -include_lib("erlmedia/include/video_frame.hrl").
 -include_lib("erlmedia/include/media_info.hrl").
 
+-include("rtp.hrl").
 -include("log.hrl").
 
 %% External API
 -export([start_link/1]).
 -export([
          play/2,
+         stop/1,
          media_info_loc/1,
          listen_ports/3,
          add_stream/3
@@ -49,30 +51,41 @@ start_link(Args) ->
 
 
 play(RTP, Fun) ->
+  ?DBG("Play: ~p, ~p", [RTP, Fun]),
   gen_server:call(RTP, {play, Fun}).
+
+stop(RTP) ->
+  ?DBG("Stop: ~p", [RTP]),
+  gen_server:call(RTP, {stop}).
 
 media_info_loc(RTP) ->
   gen_server:call(RTP, media_info_loc).
 
-listen_ports(RTP, StreamId, Transport) ->
-  gen_server:call(RTP, {listen_ports, StreamId, Transport}).
+listen_ports(RTP, Content, Transport) ->
+  gen_server:call(RTP, {listen_ports, Content, Transport}).
 
 add_stream(RTP, Location, Stream)
   when Location =:= local orelse
        Location =:= remote ->
   gen_server:call(RTP, {add_stream, Location, Stream}).
 
-
 -record(rtp_server, {
   consumer,
+
   media_info_loc,
   rtp_loc,
-  chan_loc,
+  chan_loc = [],
+
   media_info_rmt,
   rtp_rmt,
   chan_rmt,
+
   transcoder_in,
-  transcoder_out
+  transcoder_out,
+
+  udp_conn,
+
+  file
 }).
 
 %%%------------------------------------------------------------------------
@@ -92,12 +105,12 @@ add_stream(RTP, Location, Stream)
 
 
 init([Options]) ->
-  MediaIn = proplists:get_value(media_info_loc, Options),
-  RTP_LOC = if MediaIn == undefined -> undefined; true -> rtp:init(in, MediaIn) end,
-  MediaOut = proplists:get_value(media_info_rmt, Options),
-  RTP_RMT = if MediaOut == undefined -> undefined; true -> rtp:init(out, MediaOut) end,
+  MediaLoc = proplists:get_value(media_info_loc, Options),
+  RTP_LOC = if MediaLoc == undefined -> undefined; true -> rtp:init(local, MediaLoc) end,
+  MediaRmt = proplists:get_value(media_info_rmt, Options),
+  RTP_RMT = if MediaRmt == undefined -> undefined; true -> rtp:init(remote, MediaRmt) end,
 
-  ?DBG("RTP State Init:~nIN:~n~p~nOut:~n~p", [MediaIn, MediaOut]),
+  ?DBG("RTP State Init:~nLOC:~n~p~nRMT:~n~p", [MediaLoc, MediaRmt]),
 
   %% MediaIn = proplists:get_value(media_info_in, Options),
   %% RTP_LOC = rtp:init(in, MediaIn),
@@ -129,17 +142,22 @@ init([Options]) ->
         end
     end,
 
-  TranscoderIn = TrCreateFun(transcode_in),
-  TranscoderOut = TrCreateFun(transcode_out),
+  {ok, TranscoderIn} = TrCreateFun(transcode_in),
+  {ok, TranscoderOut} = TrCreateFun(transcode_out),
+
+  ?DBG("TranscoderIn: ~p~nTranscoderOut: ~p", [TranscoderIn, TranscoderOut]),
+
+  %%{ok, File} = file:open("/tmp/rtp.wav", [append]),
 
   {ok, #rtp_server{
-    media_info_loc = MediaIn,
+    media_info_loc = MediaLoc,
     rtp_loc = RTP_LOC,
-    media_info_rmt = MediaOut,
+    media_info_rmt = MediaRmt,
     rtp_rmt = RTP_RMT,
     consumer = Consumer,
     transcoder_in = TranscoderIn,
     transcoder_out = TranscoderOut
+    %%file = File
   }}.
 
 %%-------------------------------------------------------------------------
@@ -155,68 +173,136 @@ init([Options]) ->
 %% @private
 %%-------------------------------------------------------------------------
 handle_call({play, Fun}, _From, #rtp_server{} = Server) ->
-  Fun(),
+  Res = Fun(),
+  ?DBG("Play Fun: ~p", [Res]),
   {reply, ok, Server};
+
+handle_call({stop}, _From, #rtp_server{} = Server) ->
+  {stop, normal, ok, Server};
 
 handle_call(media_info_loc, _From, #rtp_server{media_info_loc = MediaInfo} = Server) ->
   ?DBG("RTP State:~n~p", [Server]),
   {reply, MediaInfo, Server};
 
-handle_call({listen_ports, StreamId, Transport},
+handle_call({listen_ports, Content, Transport},
             _From, #rtp_server{rtp_loc = RTP_LOC,
+                               chan_loc = ChanOpts,
                                media_info_loc = MediaLoc} = Server) ->
-  {ok, NewRTP_LOC, ChanOpts} = rtp:setup_channel(RTP_LOC, StreamId, Transport),
-  PortRTP = proplists:get_value(local_rtp_port, ChanOpts),
-  PortRTCP = proplists:get_value(local_rtcp_port, ChanOpts),
+  ?DBG("Listen ports: ~p, ~p", [Content, Transport]),
+  StreamId = stream_id(Content),
+  {ok, NewRTP_LOC, NewChanOpts} = rtp:setup_channel(RTP_LOC, StreamId, Transport),
+  UDPConn = NewRTP_LOC#rtp_state.udp,
+  ?DBG("UDPConn: ~p", [UDPConn]),
+  PortRTP = proplists:get_value(local_rtp_port, NewChanOpts),
+  PortRTCP = proplists:get_value(local_rtcp_port, NewChanOpts),
 
-  #media_info{audio = [#stream_info{options = StreamOpts} = StreamInfo], options = _SessOpts} = MediaLoc,
-  StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, PortRTP})},
-  MediaLoc1 = MediaLoc#media_info{audio = [StreamInfo1]},
+  MediaLoc1 =
+    case Content of
+      audio ->
+        #media_info{audio = [#stream_info{options = StreamOpts} = StreamInfo], options = _SessOpts} = MediaLoc,
+        StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, PortRTP})},
+        MediaLoc#media_info{audio = [StreamInfo1]};
+      video ->
+        #media_info{video = [#stream_info{options = StreamOpts} = StreamInfo], options = _SessOpts} = MediaLoc,
+        StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, PortRTP})},
+        MediaLoc#media_info{video = [StreamInfo1]}
+    end,
 
-  ?DBG("RTP State Listen:~nNewRTP_LOC:~n~p~nOpts:~n~p", [NewRTP_LOC, ChanOpts]),
+
+  ?DBG("RTP State Listen:~nNewRTP_LOC:~n~p~nOpts:~n~p", [NewRTP_LOC, NewChanOpts]),
   {reply, {ok, {PortRTP, PortRTCP}},
    Server#rtp_server{media_info_loc = MediaLoc1,
                      rtp_loc = NewRTP_LOC,
-                     chan_loc = ChanOpts}};
+                     chan_loc = lists:keystore(Content, 1, ChanOpts, {Content, NewChanOpts}),
+                     udp_conn = UDPConn}};
 
-handle_call({add_stream, Location, MediaInfo}, _From,
-            #rtp_server{} = Server)
+handle_call({add_stream, Location,
+             #media_info{audio = _Audio,
+                         video = _Video} = MediaInfo}, _From,
+            #rtp_server{udp_conn = UDPConn} = Server)
   when Location =:= local orelse
        Location =:= remote ->
 
   case Location of
     local ->
-      RTP_LOC = rtp:init(in, MediaInfo),
+      RTP_LOC = rtp:init(local, MediaInfo),
       %%{ok, RTP_LOC1, _} = rtp:setup_channel(RTP_LOC, 1, [{proto,udp},{remote_rtp_port,RPort1},{remote_rtcp_port,RPort2},{remote_addr,RAddr}]),
-      {ok, RTP_LOC1, ChanOpts} = rtp:setup_channel(RTP_LOC, 1, [{proto,udp}]),
+      Transport = [{proto,udp}],
+
+
+      {NewRTP_LOC, ChanOpts} =
+        lists:foldl(fun(C, {RL, O}) ->
+                        SId = stream_id(C),
+                        {ok, RTP_LOC1, CO} = rtp:setup_channel(RL, SId, Transport),
+                        {RTP_LOC1, lists:keystore(SId, 1, O, {SId, CO})}
+                    end, {RTP_LOC, []}, [audio
+                                         %%, video
+                                        ]),
+
+
+      %% {ok, RTP_LOC1, AudioChanOpts} = rtp:setup_channel(RTP_LOC, audio, Transport),
+      %% {ok, RTP_LOC2, VideoChanOpts} = rtp:setup_channel(RTP_LOC1, video, Transport),
 
       NewServer =
         Server#rtp_server{
           media_info_loc = MediaInfo,
-          rtp_loc = RTP_LOC1,
+          rtp_loc = NewRTP_LOC,
           chan_loc = ChanOpts
          };
     remote ->
-      #media_info{audio = [#stream_info{options = StreamOpts} = _StreamInfo], options = SessOpts} = MediaInfo,
-      RTP_RMT = rtp:init(out, MediaInfo),
-      RPort1 = proplists:get_value(port, StreamOpts),
-      RPort2 = RPort1 + 1,
-      RAddr = proplists:get_value(remote_addr, SessOpts),
-      ?DBG("RTP Net: ~p, ~p, ~p", [RAddr, RPort1, RPort2]),
-      {ok, RTP_RMT1, ChanOpts} = rtp:setup_channel(RTP_RMT, 1,
-                                                   [{proto,udp},
-                                                    {remote_rtp_port,RPort1},
-                                                    {remote_rtcp_port,RPort2},
-                                                    {remote_addr,RAddr}]),
-      ?DBG("RTP State: RTP_RMT1:~n~p~nChanOpts:~n~p", [RTP_RMT1, ChanOpts]),
+      RTP_RMT = rtp:init(remote, MediaInfo),
+
+
+      {NewRTP_RMT, ChanOpts, NewMediaInfo} =
+        lists:foldl(fun(C, {RR, O, Mi}) ->
+                        case C of
+                          audio ->
+                            #media_info{audio = [#stream_info{options = StreamOpts} = StreamInfo], options = SessOpts} = Mi;
+                          video ->
+                            #media_info{video = [#stream_info{options = StreamOpts} = StreamInfo], options = SessOpts} = Mi
+                        end,
+                        RPort1 = proplists:get_value(port, StreamOpts),
+                        RPort2 = RPort1 + 1,
+                        RAddr = proplists:get_value(remote_addr, SessOpts),
+                        ?DBG("RTP Net: ~p, ~p, ~p", [RAddr, RPort1, RPort2]),
+                        Transport = [{proto,udp},
+                                     {remote_rtp_port,RPort1},
+                                     {remote_rtcp_port,RPort2},
+                                     {remote_addr,RAddr}],
+                        %%Transport = [{proto,udp}],
+                        SId = stream_id(C),
+                        {ok, RTP_RMT1, CO} = rtp:setup_channel(RR#rtp_state{udp = UDPConn}, SId, Transport),
+                        StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, RPort1})},
+                        NewMi = Mi#media_info{audio = [StreamInfo1]},
+
+                        {RTP_RMT1, lists:keystore(SId, 1, O, {SId, CO}), NewMi}
+                    end, {RTP_RMT, [], MediaInfo}, [audio
+                                         %%, video
+                                        ]),
+
+      ?DBG("RTP State: NewRTP_RMT:~n~p~nChanOpts:~n~p", [NewRTP_RMT, ChanOpts]),
+
+      %% FIXME: Store remote ports in local state
+      RTP_LOC = Server#rtp_server.rtp_loc,
+      {UDPRmt, undefined} = NewRTP_RMT#rtp_state.udp,
+      {UDPLoc, undefined} = RTP_LOC#rtp_state.udp,
+      UDPLoc1 = UDPLoc#rtp_udp{
+                  remote_rtp_port = UDPRmt#rtp_udp.remote_rtp_port,
+                  remote_rtcp_port = UDPRmt#rtp_udp.remote_rtcp_port,
+                  remote_addr = UDPRmt#rtp_udp.remote_addr
+                 },
+      NewRTP_LOC = RTP_LOC#rtp_state{udp = {UDPLoc1, undefined}},
+      ?DBG("RTP State: NewRTP_LOC:~n~p", [NewRTP_LOC]),
+
       %% [{local_rtp_port, LPort1}, {local_rtcp_port, _LPort2}, {local_addr, _LAddr}] = Reply,
-      %% StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, LPort1})},
+      %% StreamInfo1 = StreamInfo#stream_info{options = lists:keystore(port, 1, StreamOpts, {port, RPort1})},
       %% MediaInfo1 = MediaInfo#media_info{audio = [StreamInfo1]},
 
       NewServer =
         Server#rtp_server{
-          media_info_rmt = MediaInfo,
-          rtp_rmt = RTP_RMT1
+          media_info_rmt = NewMediaInfo,
+          rtp_rmt = NewRTP_RMT,
+          rtp_loc = NewRTP_LOC
          }
   end,
 
@@ -254,7 +340,7 @@ handle_info({'DOWN', _, process, Client, _Reason}, #rtp_server{consumer = Client
 
 
 handle_info({udp, _Socket, Addr, Port, Bin},
-            #rtp_server{rtp_rmt = RTPState,
+            #rtp_server{rtp_loc = RTPState,
                         consumer = Consumer,
                         transcoder_in = Transcoder} = State) ->
   %%?DBG("RTP Handle Data: ~p, ~p,~n~p~n~p", [Addr, Port, RTPState, Bin]),
@@ -264,13 +350,33 @@ handle_info({udp, _Socket, Addr, Port, Bin},
   %%[Consumer ! transcode(Frame, Transcoder) || Frame <- Frames],
   {noreply, State#rtp_server{rtp_loc = NewRTPState, transcoder_in = NewTranscoder}};
 
-handle_info(#video_frame{} = Frame,
-            #rtp_server{rtp_loc = RTPState,
-                        transcoder_out = Transcoder} = State) ->
-  {NewFrame, NewTranscoder} = transcode_out(Frame, Transcoder),
-  {ok, NewRTPState} = rtp:handle_frame(RTPState, NewFrame),
+handle_info(#video_frame{content = audio} = Frame,
+            #rtp_server{rtp_rmt = RTPState,
+                        transcoder_out = Transcoder,
+                        file = _File} = State) ->
+  %% {#video_frame{body = <<Body:160/binary,_/binary>>} = NewFrame, NewTranscoder} =
+  %%   transcode_out(Frame, Transcoder),
+
+  {#video_frame{body = Body} = NewFrame, NewTranscoder} =
+    transcode_out(Frame, Transcoder),
+  Bodies = split_pack(Body),
+  NewRTPState =
+    lists:foldl(fun(B, St) ->
+                    {ok, NewSt} = rtp:handle_frame(St, NewFrame#video_frame{body = B}),
+                    NewSt
+                end, RTPState, Bodies),
+
+  %%?DBG("Transcoder: ~p~nFrameIn:~n~p~nFrameOut:~n~p", [Transcoder, Frame, NewFrame]),
+  %%file:write(File, NewFrame#video_frame.body),
+  %%{ok, NewRTPState} = rtp:handle_frame(RTPState, NewFrame#video_frame{body = NewBody}),
   {noreply, State#rtp_server{rtp_rmt = NewRTPState,
                              transcoder_out = NewTranscoder}};
+
+handle_info(#video_frame{content = video} = _Frame,
+            #rtp_server{rtp_rmt = _RTPState} = State) ->
+  %%?DBG("V:~n~p", [Frame]),
+  %%rtp:handle_frame(RTPState, Frame),
+  {noreply, State};
 
 handle_info(_Info, State) ->
   {stop, {unknown_message, _Info}, State}.
@@ -297,11 +403,13 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% Internal functions
 transcode_in(Consumer, Frames, undefined) ->
+  ?DBG("To ~p:~n~p", [Consumer, Frames]),
   [Consumer ! Frame || Frame <- Frames];
 transcode_in(_, [], Transcoder) ->
   Transcoder;
 transcode_in(Consumer, [H|Tail], Transcoder) ->
   {ok, TrFrame, NewTranscoder} = ems_sound:transcode(H, Transcoder),
+  %%?DBG("Transcoder: ~p~nFrameIn:~n~p~nFrameOut:~n~p", [Transcoder, H, TrFrame]),
   Consumer ! TrFrame,
   transcode_in(Consumer, Tail, NewTranscoder).
 
@@ -310,3 +418,21 @@ transcode_out(Frame, undefined) ->
 transcode_out(Frame, Transcoder) ->
   {ok, NewFrame, NewTranscoder} = ems_sound:transcode(Frame, Transcoder),
   {NewFrame, NewTranscoder}.
+
+split_pack(Data) ->
+  split_pack(Data, 160).
+
+split_pack(Data, Size) ->
+  split_pack(Data, Size, []).
+
+split_pack(Data, Size, Acc) when size(Data) >= Size ->
+  <<Head:Size/binary, Tail/binary>> = Data,
+  split_pack(Tail, Size, [Head | Acc]);
+split_pack(Data, _Size, []) ->
+  [Data];
+split_pack(Data, _Size, Acc) ->
+  lists:reverse([Data | Acc]).
+
+stream_id(audio) -> 1;
+stream_id(video) -> 2.
+

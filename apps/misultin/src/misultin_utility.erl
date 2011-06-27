@@ -1,14 +1,11 @@
 % ==========================================================================================================
-% MISULTIN - Request
+% MISULTIN - Various Utilities
 %
 % >-|-|-(°>
 % 
-% Copyright (C) 2009, Roberto Ostinelli <roberto@ostinelli.net>,
+% Copyright (C) 2011, Roberto Ostinelli <roberto@ostinelli.net>,
 %					  Bob Ippolito <bob@mochimedia.com> for Mochi Media, Inc.
 % All rights reserved.
-%
-% Code portions from Bob Ippolito have been originally taken under MIT license from MOCHIWEB:
-% <http://code.google.com/p/mochiweb/>
 %
 % BSD License
 % 
@@ -31,251 +28,116 @@
 % NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 % POSSIBILITY OF SUCH DAMAGE.
 % ==========================================================================================================
--module(misultin_req, [Req]).
--vsn('0.3').
--include_lib("kernel/include/file.hrl").
+-module(misultin_utility).
+-vsn("0.8-dev").
+
+% API
+-export([get_http_status_code/1, get_content_type/1, get_key_value/2, header_get_value/2]).
+-export([parse_qs/1, parse_qs/2, unquote/1, quote_plus/1]).
 
 % macros
 -define(PERCENT, 37).  % $\%
 -define(FULLSTOP, 46). % $\.
--define(IS_HEX(C), ((C >= $0 andalso C =< $9) orelse
-					(C >= $a andalso C =< $f) orelse
-					(C >= $A andalso C =< $F))).
--define(FILE_READ_BUFFER, 64*1012).
-
-% API
--export([raw/0]).
--export([ok/1, ok/2, ok/3, respond/2, respond/3, respond/4, stream/1, stream/2, stream/3]).
--export([get/1, host/0, socket/0, parse_qs/0, parse_post/0, file/1, file/2, resource/1]).
-
-% includes
--include("misultin.hrl").
-
+-define(IS_HEX(C), (
+	(C >= $0 andalso C =< $9) orelse
+	(C >= $a andalso C =< $f) orelse
+	(C >= $A andalso C =< $F)
+)).
+-define(QS_SAFE(C), (
+	(C >= $a andalso C =< $z) orelse
+	(C >= $A andalso C =< $Z) orelse
+	(C >= $0 andalso C =< $9) orelse
+	(C =:= ?FULLSTOP orelse C =:= $- orelse C =:= $~ orelse C =:= $_)
+)).
 
 % ============================ \/ API ======================================================================
 
-% Description: Returns raw request content.
-raw() ->
-	Req.
-
-% Description: Formats a 200 response.
-ok(Template) ->
-	ok([], Template).
-ok(Headers, Template) ->
-	respond(200, Headers, Template).
-ok(Headers, Template, Vars) ->
-	respond(200, Headers, Template, Vars).
-
-% Description: Formats a response.
-respond(HttpCode, Template) ->
-	respond(HttpCode, [], Template).
-respond(HttpCode, Headers, Template) ->
-	{HttpCode, Headers, Template}.
-respond(HttpCode, Headers, Template, Vars) when is_list(Template) =:= true ->
-	{HttpCode, Headers, io_lib:format(Template, Vars)}.
-	
-% Description: Start stream.
-stream(close) ->
-  gen_tcp:close(Req#req.socket);
-stream(head) ->
-	stream(head, 200, []);
-stream(Template) ->
-  case gen_tcp:send(Req#req.socket, Template) of
-    ok -> ok;
-    {error, closed} -> exit(normal);
-    {error, Reason} -> exit(Reason)
-  end.
-  
-stream(head, Headers) ->
-	stream(head, 200, Headers);
-stream(Template, Vars) when is_list(Template) ->
-	stream(io_lib:format(Template, Vars)).
-	
-stream(head, HttpCode, Headers) ->
-  Enc_headers = enc_headers(Headers),
-	Resp = ["HTTP/1.1 ", integer_to_list(HttpCode), " OK\r\n", Enc_headers, <<"\r\n">>],
-  gen_tcp:send(Req#req.socket, Resp).
-
-
-enc_headers([{Tag, Val}|T]) when is_atom(Tag) ->
-	[atom_to_list(Tag), ": ", enc_header_val(Val), "\r\n"|enc_headers(T)];
-enc_headers([{Tag, Val}|T]) when is_list(Tag) ->
-	[Tag, ": ", enc_header_val(Val), "\r\n"|enc_headers(T)];
-enc_headers([]) ->
-	[].
-enc_header_val(Val) when is_atom(Val) ->
-	atom_to_list(Val);
-enc_header_val(Val) when is_integer(Val) ->
-	integer_to_list(Val);
-enc_header_val(Val) ->
-	Val.
-
-% Description: Sends a file to the browser.
-file(FilePath) ->
-  {ok, FileInfo} = file:read_file_info(FilePath),
-	file_send(FilePath, [{'Last-Modified', httpd_util:rfc1123_date(FileInfo#file_info.mtime)}]).
-% Description: Sends a file for download.	
-file(attachment, FilePath) ->
-	% get filename
-	FileName = filename:basename(FilePath),
-	{ok, FileInfo} = file:read_file_info(FilePath),
-	file_send(FilePath, [
-	  {'Content-Disposition', lists:flatten(io_lib:format("attachment; filename=~s", [FileName]))},
-	  {'Last-Modified', httpd_util:rfc1123_date(FileInfo#file_info.mtime)}
-	]).
-
-% Description: Get request info.
-get(peer_addr) ->
-  case proplists:get_value("X-Real-Ip", Req#req.headers) of
-    undefined ->
-      case proplists:get_value("X-Forwarded-For", Req#req.headers) of
-        undefined -> Req#req.peer_addr;
-        {A,B,C,D} ->
-          lists:flatten(io_lib:format("~p.~p.~p.~p", [A,B,C,D]))
-      end;
-    Else ->
-      Else
-  end;  
-	
-get(peer_port) ->
-	Req#req.peer_port;
-get(connection) ->
-	Req#req.connection;
-get(content_length) ->
-	Req#req.content_length;
-get(vsn) ->
-	Req#req.vsn;
-get(method) ->
-	Req#req.method;
-get(uri) ->
-	Req#req.uri;
-get(args) ->
-	Req#req.args;
-get(headers) ->
-	Req#req.headers;
-get(cookies) ->
-  case proplists:get_value('Cookie', Req#req.headers) of
-    undefined -> [];
-    Cookies -> [{string:strip(Key),Value} || {Key,Value} <- parse_qs(Cookies)]
-  end;
-get(body) ->
-	Req#req.body.
-
-host() ->
-  Req#req.host.
-  
-socket() ->
-  Req#req.socket.
-  
-
-% Description: Parse QueryString
-parse_qs() ->
-	parse_qs(Req#req.args).
-
-% Description: Parse Post
-parse_post() ->
-	% get header confirmation
-	case proplists:get_value('Content-Type', Req#req.headers) of
-		undefined ->
-			[];
-		ContentType ->
-			[Type|Modificator] = string:tokens(ContentType, "; "),
-			case Type of
-				"application/x-www-form-urlencoded" ->
-					parse_qs(Req#req.body);
-				"multipart/form-data" ->
-				  ["boundary=" ++ Boundary] = Modificator,
-				  parse_multipart_form_data(Req#req.body, list_to_binary(Boundary));
-				_Other ->
-					[]
-			end
-	end.
-	
-parse_multipart_form_data(Body, Boundary)	->
-  [<<>> | Parts] = re:split(Body, <<"--", Boundary/binary>>),
-  lists:foldl(fun
-    (<<"--\r\n">>, Data) -> Data;
-    (Part, Data) ->
-    case re:run(Part, "Content-Disposition: form-data; name=\"([^\"]+)\".*\r\n\r\n(.+)\r\n", [{capture, all_but_first,binary},ungreedy,dotall]) of
-      {match, [Key, Value]} ->
-        [{binary_to_list(Key),Value}|Data];
-      _ ->
-        io:format("Unknown part: ~p~n", [Part]),
-        Data
-    end  
-  end, [], Parts).
-
-% Description: Sets resource elements for restful services.
-resource(Options) when is_list(Options) ->
-	% clean uri
-	{_UriType, RawUri} = Req#req.uri,
-	Uri = lists:foldl(fun(Option, Acc) -> clean_uri(Option, Acc) end, RawUri, Options),
-	% split
-	URI = string:tokens(Uri, "/"),
-	lists:filter(fun("..") -> false; (_) -> true end, URI).
-
-% ============================ /\ API ======================================================================
-
-
-
-% ============================ \/ INTERNAL FUNCTIONS =======================================================
-
-% parse querystring & post
-parse_qs(Binary) when is_binary(Binary) ->
-	parse_qs(binary_to_list(Binary));
-parse_qs(String) ->
-	parse_qs(String, []).
-parse_qs([], Acc) ->
-	lists:reverse(Acc);
-parse_qs(String, Acc) ->
-	{Key, Rest} = parse_qs_key(String),
-	{Value, Rest1} = parse_qs_value(Rest),
-	parse_qs(Rest1, [{Key, Value} | Acc]).
-parse_qs_key(String) ->
-	parse_qs_key(String, []).
-parse_qs_key([], Acc) ->
-	{qs_revdecode(Acc), ""};
-parse_qs_key([$= | Rest], Acc) ->
-	{qs_revdecode(Acc), Rest};
-parse_qs_key(Rest=[$; | _], Acc) ->
-	{qs_revdecode(Acc), Rest};
-parse_qs_key(Rest=[$& | _], Acc) ->
-	{qs_revdecode(Acc), Rest};
-parse_qs_key([C | Rest], Acc) ->
-	parse_qs_key(Rest, [C | Acc]).
-parse_qs_value(String) ->
-	parse_qs_value(String, []).
-parse_qs_value([], Acc) ->
-	{qs_revdecode(Acc), ""};
-parse_qs_value([$; | Rest], Acc) ->
-	{qs_revdecode(Acc), Rest};
-parse_qs_value([$& | Rest], Acc) ->
-	{qs_revdecode(Acc), Rest};
-parse_qs_value([C | Rest], Acc) ->
-	parse_qs_value(Rest, [C | Acc]).
-
-% revdecode
-qs_revdecode(S) ->
-	qs_revdecode(S, []).
-qs_revdecode([], Acc) ->
-	Acc;
-qs_revdecode([$+ | Rest], Acc) ->
-	qs_revdecode(Rest, [$\s | Acc]);
-qs_revdecode([Lo, Hi, ?PERCENT | Rest], Acc) when ?IS_HEX(Lo), ?IS_HEX(Hi) ->
-	qs_revdecode(Rest, [(unhexdigit(Lo) bor (unhexdigit(Hi) bsl 4)) | Acc]);
-qs_revdecode([C | Rest], Acc) ->
-	qs_revdecode(Rest, [C | Acc]).
-
-% unexdigit
-unhexdigit(C) when C >= $0, C =< $9 -> C - $0;
-unhexdigit(C) when C >= $a, C =< $f -> C - $a + 10;
-unhexdigit(C) when C >= $A, C =< $F -> C - $A + 10.
-
-% unquote
-unquote(Binary) when is_binary(Binary) ->
-	unquote(binary_to_list(Binary));
-unquote(String) ->
-	qs_revdecode(lists:reverse(String)).
+% Function: HttpStatus
+% Description: Returns a complete HTTP header
+% most common first
+get_http_status_code(200) ->
+	"HTTP/1.1 200 OK\r\n";
+get_http_status_code(100) ->
+	"HTTP/1.1 100 Continue\r\n";
+get_http_status_code(101) ->
+	"HTTP/1.1 101 Switching Protocols\r\n";
+get_http_status_code(301) ->
+	"HTTP/1.1 301 Moved Permanently\r\n";
+get_http_status_code(400) ->
+	"HTTP/1.1 400 Bad Request\r\n";
+get_http_status_code(401) ->
+	"HTTP/1.1 401 Unauthorized\r\n";	
+get_http_status_code(403) ->
+	"HTTP/1.1 403 Forbidden\r\n";
+get_http_status_code(404) ->
+	"HTTP/1.1 404 Not Found\r\n";				
+get_http_status_code(408) ->
+	"HTTP/1.1 408 Request Timeout\r\n";			
+get_http_status_code(500) ->
+	"HTTP/1.1 500 Internal Server Error\r\n";
+get_http_status_code(501) ->
+	"HTTP/1.1 501 Not Implemented\r\n";				
+% less common last
+get_http_status_code(201) ->
+	"HTTP/1.1 201 Created\r\n";
+get_http_status_code(202) ->
+	"HTTP/1.1 202 Accepted\r\n";
+get_http_status_code(203) ->
+	"HTTP/1.1 203 Non-Authoritative Information\r\n";
+get_http_status_code(204) ->
+	"HTTP/1.1 204 No Content\r\n";
+get_http_status_code(205) ->
+	"HTTP/1.1 205 Reset Content\r\n";
+get_http_status_code(206) ->
+	"HTTP/1.1 206 Partial Content\r\n";
+get_http_status_code(300) ->
+	"HTTP/1.1 300 Multiple Choices\r\n";
+get_http_status_code(302) ->
+	"HTTP/1.1 302 Found\r\n";
+get_http_status_code(303) ->
+	"HTTP/1.1 303 See Other\r\n";
+get_http_status_code(304) ->
+	"HTTP/1.1 304 Not Modified\r\n";
+get_http_status_code(305) ->
+	"HTTP/1.1 305 Use Proxy\r\n";
+get_http_status_code(307) ->
+	"HTTP/1.1 307 Temporary Redirect\r\n";
+get_http_status_code(402) ->
+	"HTTP/1.1 402 Payment Required\r\n";
+get_http_status_code(405) ->
+	"HTTP/1.1 405 Method Not Allowed\r\n";
+get_http_status_code(406) ->
+	"HTTP/1.1 406 Not Acceptable\r\n";
+get_http_status_code(407) ->
+	"HTTP/1.1 407 Proxy Authentication Required\r\n";
+get_http_status_code(409) ->
+	"HTTP/1.1 409 Conflict\r\n";
+get_http_status_code(410) ->
+	"HTTP/1.1 410 Gone\r\n";
+get_http_status_code(411) ->
+	"HTTP/1.1 411 Length Required\r\n";
+get_http_status_code(412) ->
+	"HTTP/1.1 412 Precondition Failed\r\n";
+get_http_status_code(413) ->
+	"HTTP/1.1 413 Request Entity Too Large\r\n";
+get_http_status_code(414) ->
+	"HTTP/1.1 414 Request-URI Too Long\r\n";
+get_http_status_code(415) ->
+	"HTTP/1.1 415 Unsupported Media Type\r\n";
+get_http_status_code(416) ->
+	"HTTP/1.1 416 Requested Range Not Satisfiable\r\n";
+get_http_status_code(417) ->
+	"HTTP/1.1 417 Expectation Failed\r\n";
+get_http_status_code(502) ->
+	"HTTP/1.1 502 Bad Gateway\r\n";
+get_http_status_code(503) ->
+	"HTTP/1.1 503 Service Unavailable\r\n";
+get_http_status_code(504) ->
+	"HTTP/1.1 504 Gateway Timeout\r\n";
+get_http_status_code(505) ->
+	"HTTP/1.1 505 HTTP Version Not Supported\r\n";
+get_http_status_code(Other) ->
+	lists:flatten(io_lib:format("HTTP/1.1 ~p \r\n", [Other])).
 
 % get content type
 get_content_type(FileName) ->
@@ -299,6 +161,7 @@ get_content_type(FileName) ->
 		".jpg" -> "image/jpeg";
 		".tif" -> "image/tiff";
 		".tiff" -> "image/tiff";
+		".png" -> "image/png";
 		".htm" -> "text/html";
 		".html" -> "text/html";
 		".txt" -> "text/plain";
@@ -474,65 +337,122 @@ get_content_type(FileName) ->
 		_ -> "application/octet-stream"
 	end.
 
-% Description: Clean URI.
-clean_uri(lowercase, Uri) ->
-	string:to_lower(Uri);
-clean_uri(urldecode, Uri) ->
-	unquote(Uri);	
-% ignore unexisting option
-clean_uri(_Unavailable, Uri) ->
-	Uri.
+% faster than proplists:get_value
+get_key_value(Key, List) ->
+	case lists:keyfind(Key, 1, List) of
+		false-> undefined;
+		{_K, Value}-> Value
+	end.
 
-% sending of a file
-file_send(FilePath, Headers) ->
-	% get file size
-	case file:read_file_info(FilePath) of
-		{ok, FileInfo} ->
-			% get filesize
-			FileSize = FileInfo#file_info.size,
-			% send headers
-			HeadersFull = [{'Content-Type', get_content_type(FilePath)}, {'Content-Length', FileSize} | Headers],
-			stream(head, HeadersFull),
-			% do the gradual sending
-			case file_open_and_send(FilePath) of
-				{error, _Reason} ->
-					{raw, ?INTERNAL_SERVER_ERROR_500};
-				ok ->
-					% sending successful
-					ok
+% Function: Value | false
+% Description: Find atom Tag in Headers, Headers being both atoms [for known headers] and strings. Comparison on string Header Tags is case insensitive.
+header_get_value(Tag, Headers) when is_atom(Tag) ->
+	case lists:keyfind(Tag, 1, Headers) of
+		false ->
+			% header not found, test also conversion to string -> convert all string tags to lowercase (HTTP tags are case insensitive)
+			F =	 fun({HTag, HValue}) -> 
+				case is_atom(HTag) of
+					true -> {HTag, HValue};
+					false -> {string:to_lower(HTag), HValue}
+				end
+			end,
+			HeadersStr = lists:map(F, Headers),
+			% test
+			case lists:keyfind(string:to_lower(atom_to_list(Tag)), 1, HeadersStr) of
+				false -> false;
+				{_, Value} -> Value
 			end;
-		{error, _Reason} ->
-			{raw, ?INTERNAL_SERVER_ERROR_500}
+		{_, Value} -> Value
 	end.
-file_open_and_send(FilePath) ->
-	case file:open(FilePath, [read, binary]) of
-		{error, Reason} ->
-			{error, Reason};
-		{ok, IoDevice} ->
-			% read portions
-			case file_read_and_send(IoDevice, 0) of 
-				{error, Reason} ->
-					file:close(IoDevice),
-					{error, Reason};
-				ok ->
-					file:close(IoDevice),
-					ok
-			end
-	end.
-file_read_and_send(IoDevice, Position) ->
-	% read buffer
-	case file:pread(IoDevice, Position, ?FILE_READ_BUFFER) of
-		{ok, Data} ->
-			% file read, send
-			stream(Data),
-			% loop
-			file_read_and_send(IoDevice, Position + ?FILE_READ_BUFFER);
-		eof ->
-			% finished, close
-			stream(close),
-			ok;
-		{error, Reason} ->
-			{error, Reason}
-	end.
+
+
+%% @spec parse_qs(string() | binary()) -> [{Key, Value}]
+%% @doc Parse a query string or application/x-www-form-urlencoded.
+parse_qs(Binary) when is_binary(Binary) ->
+	parse_qs(binary_to_list(Binary));
+parse_qs(String) ->
+	parse_qs(String, []).
+parse_qs([], Acc) ->
+	lists:reverse(Acc);
+parse_qs(String, Acc) ->
+	{Key, Rest} = parse_qs_key(String),
+	{Value, Rest1} = parse_qs_value(Rest),
+	parse_qs(Rest1, [{Key, Value} | Acc]).
+	
+% unquote
+unquote(Binary) when is_binary(Binary) ->
+	unquote(binary_to_list(Binary));
+unquote(String) ->
+	qs_revdecode(lists:reverse(String)).
+
+%% @spec quote_plus(atom() | integer() | float() | string() | binary()) -> string()
+%% @doc URL safe encoding of the given term.
+quote_plus(Atom) when is_atom(Atom) ->
+	quote_plus(atom_to_list(Atom));
+quote_plus(Int) when is_integer(Int) ->
+	quote_plus(integer_to_list(Int));
+quote_plus(Binary) when is_binary(Binary) ->
+	quote_plus(binary_to_list(Binary));
+quote_plus(String) ->
+	quote_plus(String, []).
+
+% ============================ /\ API ======================================================================
+
+
+% ============================ \/ INTERNAL FUNCTIONS =======================================================
+
+% parse querystring & post
+parse_qs_key(String) ->
+	parse_qs_key(String, []).
+parse_qs_key([], Acc) ->
+	{qs_revdecode(Acc), ""};
+parse_qs_key([$= | Rest], Acc) ->
+	{qs_revdecode(Acc), Rest};
+parse_qs_key(Rest=[$; | _], Acc) ->
+	{qs_revdecode(Acc), Rest};
+parse_qs_key(Rest=[$& | _], Acc) ->
+	{qs_revdecode(Acc), Rest};
+parse_qs_key([C | Rest], Acc) ->
+	parse_qs_key(Rest, [C | Acc]).
+parse_qs_value(String) ->
+	parse_qs_value(String, []).
+parse_qs_value([], Acc) ->
+	{qs_revdecode(Acc), ""};
+parse_qs_value([$; | Rest], Acc) ->
+	{qs_revdecode(Acc), Rest};
+parse_qs_value([$& | Rest], Acc) ->
+	{qs_revdecode(Acc), Rest};
+parse_qs_value([C | Rest], Acc) ->
+	parse_qs_value(Rest, [C | Acc]).
+
+% revdecode
+qs_revdecode(S) ->
+	qs_revdecode(S, []).
+qs_revdecode([], Acc) ->
+	Acc;
+qs_revdecode([$+ | Rest], Acc) ->
+	qs_revdecode(Rest, [$\s | Acc]);
+qs_revdecode([Lo, Hi, ?PERCENT | Rest], Acc) when ?IS_HEX(Lo), ?IS_HEX(Hi) ->
+	qs_revdecode(Rest, [(unhexdigit(Lo) bor (unhexdigit(Hi) bsl 4)) | Acc]);
+qs_revdecode([C | Rest], Acc) ->
+	qs_revdecode(Rest, [C | Acc]).
+
+% unexdigit
+unhexdigit(C) when C >= $0, C =< $9 -> C - $0;
+unhexdigit(C) when C >= $a, C =< $f -> C - $a + 10;
+unhexdigit(C) when C >= $A, C =< $F -> C - $A + 10.
+hexdigit(C) when C < 10 -> $0 + C;
+hexdigit(C) when C < 16 -> $A + (C - 10).
+
+% quote
+quote_plus([], Acc) ->
+	lists:reverse(Acc);
+quote_plus([C | Rest], Acc) when ?QS_SAFE(C) ->
+	quote_plus(Rest, [C | Acc]);
+quote_plus([$\s | Rest], Acc) ->
+	quote_plus(Rest, [$+ | Acc]);
+quote_plus([C | Rest], Acc) ->
+	<<Hi:4, Lo:4>> = <<C>>,
+	quote_plus(Rest, [hexdigit(Lo), hexdigit(Hi), ?PERCENT | Acc]).
 
 % ============================ /\ INTERNAL FUNCTIONS =======================================================

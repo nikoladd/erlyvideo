@@ -23,39 +23,44 @@
 %%%
 %%%---------------------------------------------------------------------------------------
 -module(ems_http).
--export([start_listener/1, start_link/1, accept/2, stop/0, handle_http/1, http/4, wwwroot/1]).
+-export([start_listener/1, stop/0, handle_http/1, http/4, wwwroot/1, host/1]).
 -include("../log.hrl").
 
   
 % start misultin http server
-start_listener(BindSpec) ->
-  gen_listener:start_link(BindSpec, ems_http, []).
+start_listener(Port) when is_number(Port) ->
+  misultin:start_link([{port, Port},{recbuf,65536},{max_connections,10240}, {loop, fun(Req) -> handle_http(Req) end}]).
+	
   
   
-accept(Socket, []) ->
-  inet:setopts(Socket, [{packet,http}]),
-  {ok, Worker} = ems_sup:start_http_worker(Socket),
-  gen_tcp:controlling_process(Socket, Worker),
-  ems_network_lag_monitor:watch(Worker),
-  Worker ! socket,
-  ok.
-
 % stop misultin
 stop() ->
 	misultin:stop().
 	
-	
-start_link(ClientSocket) ->
-  misultin_socket:start_link(ClientSocket, fun handle_http/1).
+
+host(Req) ->
+  case proplists:get_value('Host', Req:get(headers)) of
+    undefined -> default;
+    Val -> ems:host(hd(string:tokens(Val, ":")))
+  end.
 
 % callback on request received
 handle_http(Req) ->
   random:seed(now()),
-  Host = ems:host(Req:host()),
+  Host = host(Req),
   Method = Req:get(method),
   Path = Req:resource([urldecode]),
   Chain = ems:get_var(www_handlers, Host, [ems_http_rtmpt, {ems_http_file, "wwwroot"}]),  
   Headers = Req:get(headers),
+  % ?D({http, Method, Path, Headers}),
+  case Path  of
+    ["iphone"| _] -> 
+      try_handler(Chain, Host, Method, Path, Req);
+    _Else ->
+      admin_protect(Headers, Chain, Host, Method, Path, Req)
+  end.
+
+admin_protect(Headers, Chain, Host, Method, Path, Req) ->
   case ems:get_var(http_admin_password,Host,[]) of
     [] ->
       try_handler(Chain, Host, Method, Path, Req);

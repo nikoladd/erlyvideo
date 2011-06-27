@@ -72,7 +72,6 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]). %, format_status/2
 
 
--export([get/2, set/3, set/2]).
 -export([source_is_lost/1, source_is_restored/1]).
 
 
@@ -197,8 +196,8 @@ set_source(Media, Source) when is_pid(Media) ->
 %% submodule. For example, PUT mpegts requires it.
 %% @end
 %%----------------------------------------------------------------------
-set_socket(Media, Socket) when is_pid(Media) ->
-  gen_tcp:controlling_process(Socket, Media),
+set_socket(Media, Socket) when is_pid(Media) andalso is_port(Socket) ->
+  ok = gen_tcp:controlling_process(Socket, Media),
   gen_server:cast(Media, {set_socket, Socket}).
   
 %%----------------------------------------------------------------------
@@ -343,8 +342,8 @@ info(Media) ->
 %% @end
 %%----------------------------------------------------------------------
 info(Media, Properties) ->
-  properties_are_valid(Properties) orelse erlang:error({badarg, Properties}),
-  gen_server:call(Media, {info, Properties}).
+  ValidProperties = clean_properties(Properties),
+  gen_server:call(Media, {info, ValidProperties}).
 
 %%----------------------------------------------------------------------
 %% @spec (Media::pid(), Properties::list()) -> Info::list()
@@ -356,10 +355,18 @@ full_info(Media) ->
   info(Media, known_properties()).
   
 known_properties() ->
-  [client_count, url, type, storage, clients, last_dts, ts_delay, created_at, options].
+  [client_count, url, type, storage, clients, last_dts, ts_delay, created_at, options, hls_playlist].
   
-properties_are_valid(Properties) ->
-  lists:subtract(Properties, known_properties()) == [].
+clean_properties(Properties) ->
+  clean_properties(Properties, []).
+
+clean_properties([], Acc) -> lists:reverse(Acc);
+clean_properties([{hls_segment, N}|Props], Acc) when is_integer(N) -> clean_properties(Props, [{hls_segment, N}|Acc]);
+clean_properties([Property|Props], Acc) ->
+  case lists:member(Property, known_properties()) of
+    true -> clean_properties(Props, [Property|Acc]);
+    false -> clean_properties(Props, Acc)
+  end.
   
   
 
@@ -405,6 +412,7 @@ init([Module, Options]) ->
                      clients = ems_media_clients:init(Options), host = proplists:get_value(host, Options),
                      media_info = proplists:get_value(media_info, Options, #media_info{flow_type = stream}),
                      glue_delta = proplists:get_value(glue_delta, Options, ?DEFAULT_GLUE_DELTA),
+                     sort_count = proplists:get_value(sort_count, Options, 10),
                      created_at = ems:now(utc), last_dts_at = os:timestamp()},
   
   Media_ = ems_media_frame:init(Media),                   
@@ -419,7 +427,12 @@ init([Module, Options]) ->
       {ok, Media4, ?TIMEOUT};
     {stop, Reason} ->
       ?D({"ems_media failed to initialize",Module,Reason}),
-      {stop, Reason}
+      ExitReason = case Reason of
+        normal -> normal;
+        notfound -> normal;
+        _ -> Reason
+      end,
+      {stop, ExitReason}
   end.
 
 
@@ -497,6 +510,11 @@ handle_call(stop, _From, Media) ->
   {stop, normal, Media};
 
   
+handle_call({get_field, Key}, _From, Media) ->
+  {reply, get(Media, Key), Media};
+
+handle_call({set_field, Key, Value}, _From, Media) ->
+  {reply, ok, set(Media, Key, Value)};
 
 
 handle_call(media_info, _From, #ems_media{media_info = #media_info{audio = A, video = V} = Info} = Media) when A =/= wait andalso V =/= wait ->
@@ -547,11 +565,29 @@ handle_call({read_frame, Client, Key}, _From, #ems_media{format = Format, storag
   end,
   {reply, Frame, Media1#ems_media{storage = Storage1}, ?TIMEOUT};
 
-handle_call({info, Properties}, _From, Media) ->
-  {reply, reply_with_info(Media, Properties), Media, ?TIMEOUT};
+handle_call({info, Properties}, _From, #ems_media{hls_state = HLS} = Media) ->
+  Media1 = case HLS of
+    undefined ->
+      HLSRequested = lists:member(hls_playlist, Properties) or (length([1 || {hls_segment, _} <- Properties]) > 0),
+      case HLSRequested of
+        true -> Media#ems_media{hls_state = hls_media:init(Media)};
+        false -> Media
+      end;
+    _ -> Media
+  end,  
+  {reply, reply_with_info(Media1, Properties), Media1, ?TIMEOUT};
 
-handle_call(Request, _From, State) ->
-  {stop, {unknown_call, Request}, State}.
+handle_call(Request, _From, #ems_media{module = M} = Media) ->
+  case M:handle_control(Request, Media) of
+    {noreply, Media1} ->
+      {reply, {error, {unknown_call, Request}}, Media1, ?TIMEOUT};
+    {reply, Reply, Media1} ->
+      {reply, Reply, Media1, ?TIMEOUT};
+    {stop, Reason, Reply, Media1} ->
+      {stop, Reason, Reply, Media1};
+    {stop, Reason, Media1} ->
+      {stop, Reason, Media1}
+  end.
 
 
 %%-------------------------------------------------------------------------
@@ -762,6 +798,8 @@ storage_properties(#ems_media{format = Format, storage = Storage}) -> lists:ukey
 
 reply_with_info(#ems_media{type = Type, url = URL, last_dts = LastDTS, last_dts_at = LastDTSAt, created_at = CreatedAt, options = Options} = Media, Properties) ->
   lists:foldl(fun
+    (hls_playlist, Props) -> [{hls_playlist, hls_media:playlist(Media#ems_media.hls_state)}|Props];
+    ({hls_segment, Num}, Props) -> [{{hls_segment, Num}, hls_media:segment(Media#ems_media.hls_state, Num)}|Props];
     (type, Props)         -> [{type,Type}|Props];
     (url, Props)          -> [{url,URL}|Props];
     (last_dts, Props)     -> [{last_dts,LastDTS}|Props];
@@ -792,8 +830,8 @@ source_is_restored(#ems_media{} = Media) ->
 %% @end
 %% @private
 %%-------------------------------------------------------------------------
-terminate(normal, #ems_media{source = Source}) when Source =/= undefined ->
-  ?D("ems_media exit normal"),
+terminate(normal, #ems_media{source = Source, name = Name}) when Source =/= undefined ->
+  ?D({"ems_media exit normal", Name}),
   erlang:exit(Source, shutdown),
   ok;
 
